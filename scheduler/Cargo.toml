@@ -5,3 +5,6 @@ edition = "2024"
 
 [dependencies]
 sha3 = "0.10.8"
+
+[dev-dependencies]
+assert_fs = "1.1.2"

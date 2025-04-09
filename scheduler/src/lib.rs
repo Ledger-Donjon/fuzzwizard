@@ -19,13 +19,21 @@ struct Task {
     stderr: ChildStderr,
 }
 
-pub struct Scheduler<R: TargetsCollector> {
-    collector: R,
+pub struct Scheduler<C: TargetsCollector> {
+    collector: C,
     targets: HashMap<Sha, PathBuf>,
     task_processes: HashMap<Sha, Task>,
 }
 
-impl<R: TargetsCollector> Scheduler<R> {
+impl<C: TargetsCollector> Scheduler<C> {
+    pub fn new(collector: C) -> Self {
+        Self {
+            collector,
+            targets: HashMap::new(),
+            task_processes: HashMap::new(),
+        }
+    }
+
     pub fn update(&mut self) {
         let latest_targets = self.collector.get_latest_targets();
 
@@ -108,72 +116,5 @@ impl<R: TargetsCollector> Scheduler<R> {
                 Err(_) => todo!(),
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{fs::read_dir, time::Duration};
-
-    use super::*;
-
-    struct Collector {
-        targets_dir: PathBuf,
-    }
-
-    impl TargetsCollector for Collector {
-        fn get_latest_targets(&self) -> HashMap<Sha, PathBuf> {
-            let mut latest_targets = HashMap::new();
-
-            for direntry in read_dir(&self.targets_dir).unwrap() {
-                let direntry = direntry.unwrap();
-
-                let target_path = direntry.path();
-                let target_hash = Sha3_256::digest(fs::read(&target_path).unwrap());
-
-                latest_targets.insert(target_hash.into(), target_path);
-            }
-
-            latest_targets
-        }
-    }
-
-    #[test]
-    fn test() {
-        let collector = Collector {
-            targets_dir: "./test_targets".into(),
-        };
-
-        let mut scheduler = Scheduler {
-            collector,
-            targets: HashMap::new(),
-            task_processes: HashMap::new(),
-        };
-
-        scheduler.update();
-
-        std::thread::sleep(Duration::from_secs(10));
-
-        scheduler.update();
-
-        std::thread::sleep(Duration::from_secs(10));
-    }
-
-    #[test]
-    fn test2() {
-        let collector = Collector {
-            targets_dir: "../testing_targets/build".into(),
-        };
-
-        let mut scheduler = Scheduler {
-            collector,
-            targets: HashMap::new(),
-            task_processes: HashMap::new(),
-        };
-
-        scheduler.update();
-
-        std::thread::sleep(Duration::from_secs(1));
-        scheduler.report_crashes();
     }
 }
