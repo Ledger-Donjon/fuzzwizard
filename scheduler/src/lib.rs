@@ -2,31 +2,31 @@ use sha3::{Digest, Sha3_256};
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    io::Read,
     path::PathBuf,
-    process::{Child, Command, Stdio},
+    process::{Child, ChildStderr, Command, Stdio},
 };
 
 pub trait TargetsCollector {
     fn get_latest_targets(&self) -> HashMap<Sha, PathBuf>;
 }
 
-type Sha = [u8; 32];
+pub type Sha = [u8; 32];
 
-struct Target {
-    /// Path to the target binary. The path is also used as an identifier.
-    path: PathBuf,
-    /// Hash of the target binary.
-    hash: Sha,
+#[derive(Debug)]
+struct Task {
+    child: Child,
+    stderr: ChildStderr,
 }
 
-struct Scheduler<R: TargetsCollector> {
+pub struct Scheduler<R: TargetsCollector> {
     collector: R,
     targets: HashMap<Sha, PathBuf>,
-    task_processes: HashMap<Sha, Child>,
+    task_processes: HashMap<Sha, Task>,
 }
 
 impl<R: TargetsCollector> Scheduler<R> {
-    fn update(&mut self) {
+    pub fn update(&mut self) {
         let latest_targets = self.collector.get_latest_targets();
 
         println!("{:?}", latest_targets);
@@ -41,16 +41,29 @@ impl<R: TargetsCollector> Scheduler<R> {
 
         // TODO: Handle errors
         for &target in targets_to_stop {
-            self.task_processes.remove(target).unwrap().kill().unwrap();
+            self.task_processes
+                .remove(target)
+                .unwrap()
+                .child
+                .kill()
+                .unwrap();
         }
 
         println!("{:?}", targets_to_start);
 
         for &target in targets_to_start {
-            let child = Command::new(latest_targets.get(target).unwrap())
+            let mut child = Command::new(latest_targets.get(target).unwrap())
+                .stderr(Stdio::piped())
                 .spawn()
                 .unwrap();
-            self.task_processes.insert(*target, child);
+            let child_stderr = child.stderr.take().unwrap();
+            self.task_processes.insert(
+                *target,
+                Task {
+                    child,
+                    stderr: child_stderr,
+                },
+            );
         }
 
         for &target in targets_to_check {
@@ -58,23 +71,49 @@ impl<R: TargetsCollector> Scheduler<R> {
                 continue;
             }
 
-            self.task_processes.remove(target).unwrap().kill().unwrap();
-            let child = Command::new(latest_targets.get(target).unwrap())
-                .stdout(Stdio::piped())
+            self.task_processes
+                .remove(target)
+                .unwrap()
+                .child
+                .kill()
+                .unwrap();
+            let mut child = Command::new(latest_targets.get(target).unwrap())
+                .stderr(Stdio::piped())
                 .spawn()
                 .unwrap();
-            self.task_processes.insert(*target, child);
+            let child_stderr = child.stderr.take().unwrap();
+            self.task_processes.insert(
+                *target,
+                Task {
+                    child,
+                    stderr: child_stderr,
+                },
+            );
         }
 
         println!("{:?}", self.task_processes);
 
         self.targets = latest_targets;
     }
+
+    pub fn report_crashes(&mut self) {
+        for (_, task) in self.task_processes.iter_mut() {
+            match task.child.try_wait() {
+                Ok(None) => {}
+                Ok(Some(_)) => {
+                    let mut stderr = String::new();
+                    task.stderr.read_to_string(&mut stderr).unwrap();
+                    println!("{:?}", stderr);
+                }
+                Err(_) => todo!(),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::read_dir, hash::Hash, time::Duration};
+    use std::{fs::read_dir, time::Duration};
 
     use super::*;
 
@@ -118,5 +157,23 @@ mod tests {
         scheduler.update();
 
         std::thread::sleep(Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test2() {
+        let collector = Collector {
+            targets_dir: "../testing_targets/build".into(),
+        };
+
+        let mut scheduler = Scheduler {
+            collector,
+            targets: HashMap::new(),
+            task_processes: HashMap::new(),
+        };
+
+        scheduler.update();
+
+        std::thread::sleep(Duration::from_secs(1));
+        scheduler.report_crashes();
     }
 }
