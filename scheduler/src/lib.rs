@@ -111,7 +111,16 @@ impl<C: TargetsCollector> Scheduler<C> {
                 Ok(Some(_)) => {
                     let mut stderr = String::new();
                     task.stderr.read_to_string(&mut stderr).unwrap();
-                    println!("{:?}", stderr);
+                    // println!("{:?}", stderr);
+
+                    // Get crashing corpus instance
+                    let crash = stderr.lines().filter(|l| l.starts_with("artifact_prefix=")).next().unwrap();
+                    let pattern = "Test unit written to ";
+                    let crash_corpus = &crash[crash.find(pattern).unwrap() + pattern.len()..];
+                    let crashing_instance = fs::read(crash_corpus).unwrap();
+                    
+                    // Send crashing input to the backend
+                    // reqwest.post(...)
                 }
                 Err(_) => todo!(),
             }
