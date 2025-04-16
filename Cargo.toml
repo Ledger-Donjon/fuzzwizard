@@ -1,3 +1,3 @@
 [workspace]
-members = [ "scheduler" ]
+members = [ "backend", "scheduler" ]
 resolver = "3"
