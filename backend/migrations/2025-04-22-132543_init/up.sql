@@ -2,5 +2,6 @@
 
 CREATE TABLE crashes (
 	id SERIAL PRIMARY KEY, 
-	report BYTEA
+	input BYTEA NOT NULL,
+	report BYTEA NOT NULL
 );

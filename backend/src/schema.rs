@@ -3,6 +3,7 @@
 diesel::table! {
     crashes (id) {
         id -> Int4,
-        report -> Nullable<Bytea>,
+        input -> Bytea,
+        report -> Bytea,
     }
 }
