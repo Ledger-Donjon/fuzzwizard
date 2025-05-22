@@ -1,4 +1,3 @@
-use sha3::{Digest, Sha3_256};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -121,7 +120,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                         .unwrap();
                     let pattern = "Test unit written to ";
                     let crash_corpus = &crash[crash.find(pattern).unwrap() + pattern.len()..];
-                    let crashing_instance = fs::read(crash_corpus).unwrap();
+                    let _crashing_instance = fs::read(crash_corpus).unwrap();
 
                     // Send crashing input to the backend
                     // reqwest.post(...)
