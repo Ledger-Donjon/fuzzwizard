@@ -6,6 +6,8 @@ use std::{
     process::{Child, ChildStderr, Command, Stdio},
 };
 
+use log::{debug, info};
+
 pub trait TargetsCollector {
     fn get_latest_targets(&self) -> HashMap<Sha, PathBuf>;
 }
@@ -36,7 +38,7 @@ impl<C: TargetsCollector> Scheduler<C> {
     pub fn update(&mut self) {
         let latest_targets = self.collector.get_latest_targets();
 
-        println!("{:?}", latest_targets);
+        debug!("latest_targets: {:?}", latest_targets);
 
         let old_targets_sha = self.targets.keys().collect::<HashSet<_>>();
         let latest_targets_sha = latest_targets.keys().collect::<HashSet<_>>();
@@ -56,7 +58,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                 .unwrap();
         }
 
-        println!("{:?}", targets_to_start);
+        debug!("targets_to_start: {:?}", targets_to_start);
 
         for &target in targets_to_start {
             let mut child = Command::new(latest_targets.get(target).unwrap())
@@ -98,19 +100,21 @@ impl<C: TargetsCollector> Scheduler<C> {
             );
         }
 
-        println!("{:?}", self.task_processes);
+        debug!("self.task_processes: {:?}", self.task_processes);
 
         self.targets = latest_targets;
     }
 
     pub fn report_crashes(&mut self) {
-        for (_, task) in self.task_processes.iter_mut() {
+        let mut tasks_to_remove = Vec::new();
+
+        for (hash, task) in self.task_processes.iter_mut() {
             match task.child.try_wait() {
                 Ok(None) => {}
                 Ok(Some(_)) => {
                     let mut stderr = String::new();
                     task.stderr.read_to_string(&mut stderr).unwrap();
-                    // println!("{:?}", stderr);
+                    info!("crash stderr: {:?}", stderr);
 
                     // Get crashing corpus instance
                     let crash = stderr
@@ -124,9 +128,15 @@ impl<C: TargetsCollector> Scheduler<C> {
 
                     // Send crashing input to the backend
                     // reqwest.post(...)
+
+                    tasks_to_remove.push(hash.clone());
                 }
                 Err(_) => todo!(),
             }
+        }
+
+        for task_to_remove in tasks_to_remove.iter() {
+            self.task_processes.remove(task_to_remove);
         }
     }
 }
