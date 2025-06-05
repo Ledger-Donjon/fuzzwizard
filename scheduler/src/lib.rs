@@ -7,6 +7,7 @@ use std::{
 };
 
 use log::{debug, info};
+use serde::Serialize;
 
 pub trait TargetsCollector {
     fn get_latest_targets(&self) -> HashMap<Sha, PathBuf>;
@@ -124,10 +125,18 @@ impl<C: TargetsCollector> Scheduler<C> {
                         .unwrap();
                     let pattern = "Test unit written to ";
                     let crash_corpus = &crash[crash.find(pattern).unwrap() + pattern.len()..];
-                    let _crashing_instance = fs::read(crash_corpus).unwrap();
+                    let crashing_instance = fs::read(crash_corpus).unwrap();
 
                     // Send crashing input to the backend
-                    // reqwest.post(...)
+                    let client = reqwest::blocking::Client::new();
+                    client
+                        .post("http://localhost:3000/upload_crash")
+                        .json(&CrashReport {
+                            report: crash.as_bytes().to_vec(),
+                            input: crashing_instance,
+                        })
+                        .send()
+                        .unwrap();
 
                     tasks_to_remove.push(hash.clone());
                 }
@@ -139,4 +148,10 @@ impl<C: TargetsCollector> Scheduler<C> {
             self.task_processes.remove(task_to_remove);
         }
     }
+}
+
+#[derive(Serialize, Clone)]
+struct CrashReport {
+    report: Vec<u8>,
+    input: Vec<u8>,
 }
