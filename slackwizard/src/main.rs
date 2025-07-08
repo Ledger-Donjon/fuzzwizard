@@ -60,6 +60,29 @@ fn main() {
     headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
     headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
 
+    let client_crash = reqwest::blocking::Client::new();
+    let mut headers_backend = HeaderMap::new();
+    headers_backend.insert(CONTENT_TYPE, "application/json".parse().unwrap());
+    let list_crashes=client_crash
+        .get("http://127.0.0.1:3000/get_crashes")
+        .headers(headers_backend)
+        .body("1")
+        .send()
+        .unwrap();
+    println!("{:?}", list_crashes.status());
+    println!("{:?}", list_crashes.text()); 
+    /*
+    let res_crash = client_crash
+        .get("http://127.0.0.1:3000/get_crash_by_id")
+        .headers(headers_backend)
+        .body("1")
+        .send()
+        .unwrap();
+
+    //println!("{:?}", res_crash.status());
+    //println!("{:?}", res_crash.text());
+
+    let message = res_crash.text().unwrap();
 
     let client = reqwest::blocking::Client::new();
     let res = client
@@ -67,7 +90,7 @@ fn main() {
         .headers(headers)
         .json(&Payload {
             channel: "fuzzing-alerts".to_owned(),
-            text: "Ceci est un test".to_owned(),
+            text: message.to_owned(),
         })
         .send()
         .unwrap();
@@ -75,21 +98,9 @@ fn main() {
     println!("{:?}", res.status());
     println!("{:?}", res.text());
 
-    //let client = reqwest::blocking::Client::new();
-    //let mut headers_backend = HeaderMap::new();
-    //headers_backend.insert(CONTENT_TYPE, "application/json".parse().unwrap());
-    //let res = client
-    //    .get("http://127.0.0.1:3000/get_crash_by_id")
-    //    .headers(headers_backend)
-    //    .body("1")
-    //    .send()
-    //    .unwrap();
 
-    //println!("{:?}", res.status());
-    //println!("{:?}", res.text());
-
-    //let message = res.text().unwrap();
 
     //send_message(message, &headers);
+    */
 
 }
