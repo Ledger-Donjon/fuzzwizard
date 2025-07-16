@@ -19,6 +19,7 @@ pub type Sha = [u8; 32];
 struct Task {
     child: Child,
     stderr: ChildStderr,
+    path: PathBuf
 }
 
 pub struct Scheduler<C: TargetsCollector> {
@@ -67,11 +68,13 @@ impl<C: TargetsCollector> Scheduler<C> {
                 .spawn()
                 .unwrap();
             let child_stderr = child.stderr.take().unwrap();
+            let path = latest_targets.get(target).unwrap().canonicalize().unwrap();
             self.task_processes.insert(
                 *target,
                 Task {
                     child,
                     stderr: child_stderr,
+                    path,
                 },
             );
         }
@@ -92,11 +95,13 @@ impl<C: TargetsCollector> Scheduler<C> {
                 .spawn()
                 .unwrap();
             let child_stderr = child.stderr.take().unwrap();
+            let path = latest_targets.get(target).unwrap().canonicalize().unwrap();
             self.task_processes.insert(
                 *target,
                 Task {
                     child,
                     stderr: child_stderr,
+                    path,
                 },
             );
         }
@@ -127,16 +132,21 @@ impl<C: TargetsCollector> Scheduler<C> {
                     let crash_corpus = &crash[crash.find(pattern).unwrap() + pattern.len()..];
                     let crashing_instance = fs::read(crash_corpus).unwrap();
 
+
                     // Send crashing input to the backend
                     let client = reqwest::blocking::Client::new();
-                    client
+                    let binary =  fs::read(task.path.clone()).unwrap();
+                    let res = client
                         .post("http://localhost:3000/upload_crash")
                         .json(&CrashReport {
-                            report: crash.as_bytes().to_vec(),
+                            report: stderr.as_bytes().to_vec(),
                             input: crashing_instance,
+                            filename:task.path.display().to_string(),
+                            program:binary,
                         })
                         .send()
                         .unwrap();
+                    println!("{:?}", res);
 
                     tasks_to_remove.push(hash.clone());
                 }
@@ -154,4 +164,6 @@ impl<C: TargetsCollector> Scheduler<C> {
 struct CrashReport {
     report: Vec<u8>,
     input: Vec<u8>,
+    filename: String,
+    program: Vec<u8>
 }
