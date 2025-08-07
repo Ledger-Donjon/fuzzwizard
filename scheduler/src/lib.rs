@@ -5,7 +5,6 @@ use std::{
     path::PathBuf,
     process::{Child, ChildStderr, Command, Stdio},
 };
-
 use log::{debug, info};
 use serde::Serialize;
 
@@ -127,10 +126,10 @@ impl<C: TargetsCollector> Scheduler<C> {
                         .lines()
                         .filter(|l| l.starts_with("artifact_prefix="))
                         .next()
-                        .unwrap();
+                        .unwrap_or("Crash detected but no element in stderr");
                     let pattern = "Test unit written to ";
-                    let crash_corpus = &crash[crash.find(pattern).unwrap() + pattern.len()..];
-                    let crashing_instance = fs::read(crash_corpus).unwrap();
+                    let crash_corpus = &crash[crash.find(pattern).unwrap_or(0) + pattern.len()..];
+                    let crashing_instance = fs::read(crash_corpus).unwrap_or("NO CRASH INFO".into());
 
 
                     // Send crashing input to the backend
