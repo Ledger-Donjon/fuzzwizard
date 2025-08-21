@@ -5,6 +5,7 @@ use chrono::{NaiveDate, NaiveDateTime};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
+use log::info;
 //use std::collections::HashMap;
 
 #[derive(Serialize)]
@@ -36,6 +37,7 @@ struct JsonFileResponse {
 
 #[derive(Deserialize, Serialize, Clone)]
 struct CrashReport {
+    id: i32,
     report: Vec<u8>,
     input: Vec<u8>,
     filename: String,
@@ -44,29 +46,45 @@ struct CrashReport {
 }
 
 fn send_message_to_channel(report:CrashReport){
-    let token = "CHANGEME"
+    let token = std::env::var("SLACK_TOKEN").expect("SLACK_TOKEN must be set");
+    let channel = std::env::var("SLACK_CHANNEL").expect("SLACK_CHANNEL must be set");
  
-    println!("{:?}", &report.filename);
+    info!("filename: {}", &report.filename);
 
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
     headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
     
     //let to_send = format!("Nouveau crash for fuzzer {} !\n{}\n```{}```\n",&report.filename, String::from_utf8_lossy(&report.input), String::from_utf8_lossy(&report.report));
-    let to_send = format!("Nouveau crash for fuzzer {} !\n",&report.filename);
+    let created_fmt = report.created_at.format("%Y-%m-%dT%H-%M-%S");
+    let stem = Path::new(&report.filename)
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let dir = format!("/tmp/tmp_{}_{}", created_fmt, stem);
+
+    let to_send = format!(
+        "Nouveau crash pour {} (id: {})\n\nPour récupérer les artefacts localement:\n\n$ curl -X POST http://127.0.0.1:3000/collect_crashes -H 'Content-Type: application/json' -d '{}'\n\nLes fichiers seront créés sous {}\n- {} (binaire du programme)\n- crash_info.txt (rapport)\n- crash_input.txt (input)\n",
+        &report.filename,
+        report.id,
+        report.id,
+        dir,
+        &report.filename
+    );
 
     let client = reqwest::blocking::Client::new();
     let res = client
         .post("https://slack.com/api/chat.postMessage")
         .headers(headers.clone())
         .json(&Payload {
-            channel: "CHANGEME".to_owned(),
+            channel,
             text: to_send.to_owned(),
         })
         .send()
         .unwrap();
-    println!("{:?}", res.status());
-    println!("{:?}", res.text());
+    info!("slack status: {:?}", res.status());
+    info!("slack body: {:?}", res.text());
 
     // Wait for file:write has been enabled on slack channel
     //let mut file = File::create("/tmp/fuzz_error.bin").unwrap();
@@ -155,6 +173,8 @@ fn main() {
     }
 
 
+    env_logger::init();
+
     loop{
 
         let client_crash = reqwest::blocking::Client::new();
@@ -169,12 +189,9 @@ fn main() {
         
         if list_crashes.status().is_success(){
             let body = list_crashes.text().unwrap();
-            
             let current_vec:Vec<CrashReport> = serde_json::from_str(&body).expect("test");
-            if current_vec.is_empty(){
-                println!("Empty"); 
-            }
-            else{
+            info!("received {} crashes", current_vec.len());
+            if !current_vec.is_empty(){
                 for elt in current_vec.iter(){
 
                     send_message_to_channel(elt.clone());
@@ -184,7 +201,6 @@ fn main() {
             }
             
         }
-        println!("{}", last_date);
 
         let mut file = OpenOptions::new()
             .write(true)

@@ -7,6 +7,7 @@ use std::{
 };
 use log::{debug, info};
 use serde::Serialize;
+use std::time::Instant;
 
 pub trait TargetsCollector {
     fn get_latest_targets(&self) -> HashMap<Sha, PathBuf>;
@@ -18,21 +19,24 @@ pub type Sha = [u8; 32];
 struct Task {
     child: Child,
     stderr: ChildStderr,
-    path: PathBuf
+    path: PathBuf,
+    started_at: Instant,
 }
 
 pub struct Scheduler<C: TargetsCollector> {
     collector: C,
     targets: HashMap<Sha, PathBuf>,
     task_processes: HashMap<Sha, Task>,
+    corpus_directory: PathBuf,
 }
 
 impl<C: TargetsCollector> Scheduler<C> {
-    pub fn new(collector: C) -> Self {
+    pub fn new(collector: C, corpus_directory: PathBuf) -> Self {
         Self {
             collector,
             targets: HashMap::new(),
             task_processes: HashMap::new(),
+            corpus_directory,
         }
     }
 
@@ -61,19 +65,29 @@ impl<C: TargetsCollector> Scheduler<C> {
 
         debug!("targets_to_start: {:?}", targets_to_start);
 
+
         for &target in targets_to_start {
-            let mut child = Command::new(latest_targets.get(target).unwrap())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
-            let child_stderr = child.stderr.take().unwrap();
+           
             let path = latest_targets.get(target).unwrap().canonicalize().unwrap();
+            let fuzzer_name = path.file_name().unwrap().to_str().unwrap();
+            let fuzzer_corpus = self.corpus_directory.join(fuzzer_name);
+            if !fuzzer_corpus.exists() {
+                fs::create_dir_all(&fuzzer_corpus).unwrap();
+            }
+            let mut child = Command::new(latest_targets.get(target).unwrap())
+            .args(&[fuzzer_corpus.display().to_string()])
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+            let child_stderr = child.stderr.take().unwrap();
             self.task_processes.insert(
                 *target,
                 Task {
                     child,
                     stderr: child_stderr,
                     path,
+                    started_at: Instant::now(),
                 },
             );
         }
@@ -89,18 +103,27 @@ impl<C: TargetsCollector> Scheduler<C> {
                 .child
                 .kill()
                 .unwrap();
+
+            let path = latest_targets.get(target).unwrap().canonicalize().unwrap();
+            let fuzzer_name = path.file_name().unwrap().to_str().unwrap();
+            let fuzzer_corpus = self.corpus_directory.join(fuzzer_name);
+            if !fuzzer_corpus.exists() {
+                fs::create_dir_all(&fuzzer_corpus).unwrap();
+            }
             let mut child = Command::new(latest_targets.get(target).unwrap())
+                .args(&[fuzzer_corpus.display().to_string()])
                 .stderr(Stdio::piped())
                 .spawn()
                 .unwrap();
             let child_stderr = child.stderr.take().unwrap();
-            let path = latest_targets.get(target).unwrap().canonicalize().unwrap();
+            
             self.task_processes.insert(
                 *target,
                 Task {
                     child,
                     stderr: child_stderr,
                     path,
+                    started_at: Instant::now(),
                 },
             );
         }
@@ -108,6 +131,9 @@ impl<C: TargetsCollector> Scheduler<C> {
         debug!("self.task_processes: {:?}", self.task_processes);
 
         self.targets = latest_targets;
+
+        // Display running tasks and their uptime
+        self.log_running_tasks();
     }
 
     pub fn report_crashes(&mut self) {
@@ -145,7 +171,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                         })
                         .send()
                         .unwrap();
-                    println!("{:?}", res);
+                    info!("upload_crash response: {:?}", res);
 
                     tasks_to_remove.push(hash.clone());
                 }
@@ -155,6 +181,28 @@ impl<C: TargetsCollector> Scheduler<C> {
 
         for task_to_remove in tasks_to_remove.iter() {
             self.task_processes.remove(task_to_remove);
+        }
+    }
+
+    pub fn running_tasks_info(&self) -> Vec<(Sha, PathBuf, std::time::Duration)> {
+        self.task_processes
+            .iter()
+            .map(|(sha, task)| (*sha, task.path.clone(), task.started_at.elapsed()))
+            .collect()
+    }
+
+    pub fn log_running_tasks(&self) {
+        if self.task_processes.is_empty() {
+            info!("No tasks running");
+            return;
+        }
+        info!("Running tasks:");
+        for (_sha, task) in self.task_processes.iter() {
+            info!(
+                "- {} running for {}s",
+                task.path.display(),
+                task.started_at.elapsed().as_secs()
+            );
         }
     }
 }

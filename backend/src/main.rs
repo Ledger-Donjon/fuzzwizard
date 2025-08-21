@@ -1,5 +1,7 @@
 use std::{
     env,
+    fs,
+    path::Path,
     sync::{Arc, Mutex},
 };
 
@@ -26,6 +28,16 @@ struct AddCrashReport {
     program: Vec<u8>,
 }
 
+#[derive(Deserialize, Serialize, Queryable, Clone)]
+struct CrashReportWithId {
+    id: i32,
+    report: Vec<u8>,
+    input: Vec<u8>,
+    filename: String,
+    program: Vec<u8>,
+    created_at: NaiveDateTime,
+}
+
 #[derive(Deserialize, Serialize, Insertable, Queryable, Clone)]
 #[diesel(table_name=crashes)]
 struct CrashReport {
@@ -50,6 +62,7 @@ async fn main() {
         .route("/upload_crash", post(upload_crash)).layer(DefaultBodyLimit::max(500 *1000 * 1000))
         .route("/get_crash_by_id", get(collect_crash_info))
         .route("/get_last_crashes", post(get_last_crashes))
+        .route("/collect_crashes", post(collect_crashes))
         .with_state(db_connection);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
@@ -101,13 +114,78 @@ async fn collect_crash_info(
 async fn get_last_crashes(
     State(db_connection): State<Arc<Mutex<PgConnection>>>,
     Json(date): Json<NaiveDateTime>,
-) -> (StatusCode, Json<Vec<CrashReport>>) {
+) -> (StatusCode, Json<Vec<CrashReportWithId>>) {
     let mut db_connection = db_connection.lock().unwrap();
-    let crash = FilterDsl::filter(crashes::table.select((crashes::report, crashes::input, crashes::filename, crashes::program, crashes::created_at)), crashes::created_at.gt(date))
-        .get_results::<CrashReport>(&mut *db_connection)
-        .unwrap();
+    let crash = FilterDsl::filter(
+        crashes::table
+            .select((
+                crashes::id,
+                crashes::report,
+                crashes::input,
+                crashes::filename,
+                crashes::program,
+                crashes::created_at,
+            )),
+        crashes::created_at.gt(date),
+    )
+    .get_results::<CrashReportWithId>(&mut *db_connection)
+    .unwrap();
 
     (StatusCode::OK, Json(crash))
+}
+
+
+async fn collect_crashes(
+    State(db_connection): State<Arc<Mutex<PgConnection>>>,
+    Json(id): Json<i32>,
+) -> (StatusCode, Json<String>) {
+    let mut db_connection = db_connection.lock().unwrap();
+    let crash = FilterDsl::filter(
+        crashes::table.select((
+            crashes::report,
+            crashes::input,
+            crashes::filename,
+            crashes::program,
+            crashes::created_at,
+        )),
+        crashes::id.eq(id),
+    )
+    .get_results::<CrashReport>(&mut *db_connection)
+    .unwrap();
+    if crash.is_empty(){
+        return (StatusCode::NOT_FOUND, Json("No crash found".to_string()));
+    }
+    let result = crash[0].clone();
+
+    let safe_filename = Path::new(&result.filename)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+
+    let safe_stem = Path::new(&safe_filename)
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+
+    let dir_name = format!(
+        "/tmp/tmp_{}_{}",
+        result.created_at.format("%Y-%m-%dT%H-%M-%S"),
+        safe_stem
+    );
+
+    fs::create_dir_all(&dir_name).unwrap();
+
+    let program_path = Path::new(&dir_name).join(&safe_filename);
+    let report_path = Path::new(&dir_name).join("crash_info.txt");
+    let input_path = Path::new(&dir_name).join("crash_input.txt");
+
+    fs::write(&program_path, &result.program).unwrap();
+    fs::write(&report_path, &result.report).unwrap();
+    fs::write(&input_path, &result.input).unwrap();
+
+    (StatusCode::CREATED, Json(dir_name))
 }
 
 
