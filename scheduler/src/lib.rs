@@ -3,11 +3,32 @@ use serde::Serialize;
 use std::time::Instant;
 use std::{
     collections::{HashMap, HashSet},
-    fs,
+    fs, io,
     io::Read,
     path::PathBuf,
     process::{Child, ChildStderr, Command, Stdio},
 };
+use thiserror::Error;
+
+/// Errors that can occur within the scheduler crate
+#[derive(Debug, Error)]
+pub enum SchedulerError {
+    /// I/O related failures (filesystem, process spawn, pipes, etc.)
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+    /// Collector returned an inconsistent state
+    #[error("Inconsistent state: {0}")]
+    InconsistentState(&'static str),
+    /// Child process had no stderr pipe attached
+    #[error("Child process missing stderr pipe")]
+    MissingChildStderr,
+    /// Failed HTTP request to backend
+    #[error("Backend error: {0}")]
+    Backend(#[from] reqwest::Error),
+}
+
+/// Convenient result alias for the scheduler crate
+pub type Result<T> = std::result::Result<T, SchedulerError>;
 
 /// A trait for collecting targets to be fuzzed by the scheduler.
 pub trait TargetsCollector {
@@ -46,7 +67,7 @@ impl<C: TargetsCollector> Scheduler<C> {
     }
 
     /// Update the scheduler with the latest targets collected by the collector.
-    pub fn update(&mut self) {
+    pub fn update(&mut self) -> Result<()> {
         let latest_targets = self.collector.collect_targets();
 
         debug!("latest_targets: {:?}", latest_targets);
@@ -59,16 +80,26 @@ impl<C: TargetsCollector> Scheduler<C> {
         let targets_to_start = latest_targets_sha.difference(&old_targets_sha);
         let targets_to_check = latest_targets_sha.intersection(&old_targets_sha);
 
-        // TODO: Handle errors
         for &target in targets_to_stop {
-            self.tasks.remove(target).unwrap().child.kill().unwrap();
+            if let Some(mut task) = self.tasks.remove(target) {
+                task.child.kill()?;
+            } else {
+                return Err(SchedulerError::InconsistentState(
+                    "task missing during stop",
+                ));
+            }
         }
 
         debug!("targets_to_start: {:?}", targets_to_start);
 
         for &target in targets_to_start {
-            let fuzzer_path = latest_targets.get(target).unwrap().canonicalize().unwrap();
-            let task = self.start_task(fuzzer_path);
+            let Some(path) = latest_targets.get(target) else {
+                return Err(SchedulerError::InconsistentState(
+                    "missing start target path",
+                ));
+            };
+            let fuzzer_path = path.canonicalize()?;
+            let task = self.start_task(fuzzer_path)?;
             self.tasks.insert(*target, task);
         }
 
@@ -77,10 +108,21 @@ impl<C: TargetsCollector> Scheduler<C> {
                 continue;
             }
 
-            self.tasks.remove(target).unwrap().child.kill().unwrap();
+            if let Some(mut task) = self.tasks.remove(target) {
+                task.child.kill()?;
+            } else {
+                return Err(SchedulerError::InconsistentState(
+                    "task missing during restart",
+                ));
+            }
 
-            let fuzzer_path = latest_targets.get(target).unwrap().canonicalize().unwrap();
-            let task = self.start_task(fuzzer_path);
+            let Some(path) = latest_targets.get(target) else {
+                return Err(SchedulerError::InconsistentState(
+                    "missing restart target path",
+                ));
+            };
+            let fuzzer_path = path.canonicalize()?;
+            let task = self.start_task(fuzzer_path)?;
             self.tasks.insert(*target, task);
         }
 
@@ -90,32 +132,36 @@ impl<C: TargetsCollector> Scheduler<C> {
 
         // Display running tasks and their uptime
         self.log_running_tasks();
+        Ok(())
     }
 
-    fn start_task(&self, fuzzer_path: PathBuf) -> Task {
-        let fuzzer_name = fuzzer_path.file_name().unwrap().to_str().unwrap();
+    fn start_task(&self, fuzzer_path: PathBuf) -> Result<Task> {
+        let fuzzer_name = fuzzer_path.file_name().and_then(|s| s.to_str()).ok_or(
+            SchedulerError::InconsistentState("invalid fuzzer path name"),
+        )?;
         let fuzzer_corpus = self.corpus_directory.join(fuzzer_name);
         if !fuzzer_corpus.exists() {
-            fs::create_dir_all(&fuzzer_corpus).unwrap();
+            fs::create_dir_all(&fuzzer_corpus)?;
         }
 
         let mut child = Command::new(&fuzzer_path)
             .args(&[fuzzer_corpus.display().to_string()])
             .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .spawn()?;
 
-        let child_stderr = child.stderr.take().unwrap();
+        let Some(child_stderr) = child.stderr.take() else {
+            return Err(SchedulerError::MissingChildStderr);
+        };
 
-        Task {
+        Ok(Task {
             child,
             stderr: child_stderr,
             path: fuzzer_path,
             started_at: Instant::now(),
-        }
+        })
     }
 
-    pub fn report_crashes(&mut self) {
+    pub fn report_crashes(&mut self) -> Result<()> {
         let mut tasks_to_remove = Vec::new();
 
         for (hash, task) in self.tasks.iter_mut() {
@@ -123,7 +169,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                 Ok(None) => {}
                 Ok(Some(_)) => {
                     let mut stderr = String::new();
-                    task.stderr.read_to_string(&mut stderr).unwrap();
+                    task.stderr.read_to_string(&mut stderr)?;
                     info!("crash stderr: {:?}", stderr);
 
                     // Get crashing corpus instance
@@ -135,12 +181,12 @@ impl<C: TargetsCollector> Scheduler<C> {
                     let pattern = "Test unit written to ";
                     let crash_corpus = &crash[crash.find(pattern).unwrap_or(0) + pattern.len()..];
                     let crashing_instance =
-                        fs::read(crash_corpus).unwrap_or("NO CRASH INFO".into());
+                        fs::read(crash_corpus).unwrap_or_else(|_| b"NO CRASH INFO".to_vec());
 
                     // Send crashing input to the backend
                     let client = reqwest::blocking::Client::new();
-                    let binary = fs::read(task.path.clone()).unwrap();
-                    let res = client
+                    let binary = fs::read(task.path.clone())?;
+                    let _res = client
                         .post(format!("{}/upload_crash", self.backend_url))
                         .json(&CrashReport {
                             report: stderr.as_bytes().to_vec(),
@@ -148,18 +194,18 @@ impl<C: TargetsCollector> Scheduler<C> {
                             filename: task.path.display().to_string(),
                             program: binary,
                         })
-                        .send()
-                        .unwrap();
+                        .send()?;
 
                     tasks_to_remove.push(*hash);
                 }
-                Err(_) => todo!(),
+                Err(e) => return Err(SchedulerError::Io(e)),
             }
         }
 
         for task_to_remove in tasks_to_remove.iter() {
             self.tasks.remove(task_to_remove);
         }
+        Ok(())
     }
 
     pub fn running_tasks_info(&self) -> Vec<(Sha, PathBuf, std::time::Duration)> {

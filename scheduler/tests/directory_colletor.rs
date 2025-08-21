@@ -9,7 +9,7 @@ struct DirectoryCollector {
 }
 
 impl TargetsCollector for DirectoryCollector {
-    fn get_latest_targets(&self) -> HashMap<Sha, PathBuf> {
+    fn collect_targets(&self) -> HashMap<Sha, PathBuf> {
         let mut latest_targets = HashMap::new();
 
         for direntry in fs::read_dir(&self.targets_dir).unwrap() {
@@ -33,7 +33,9 @@ fn directory_collector() {
         targets_dir: temp_dir.to_path_buf(),
     };
 
-    let mut scheduler = Scheduler::new(collector);
+    let corpus_dir = std::env::temp_dir();
+    let backend_url = "http://127.0.0.1:0".to_string();
+    let mut scheduler = Scheduler::new(collector, corpus_dir, backend_url);
 
     let a_sh = temp_dir.child("a.sh");
     a_sh.write_str(
@@ -61,7 +63,7 @@ done
     .unwrap();
     fs::set_permissions(b_sh.path(), fs::Permissions::from_mode(0o775)).unwrap();
 
-    scheduler.update();
+    let _ = scheduler.update();
 
     std::thread::sleep(Duration::from_secs(10));
 
@@ -80,7 +82,7 @@ done
     .unwrap();
     fs::set_permissions(c_sh.path(), fs::Permissions::from_mode(0o775)).unwrap();
 
-    scheduler.update();
+    let _ = scheduler.update();
 
     std::thread::sleep(Duration::from_secs(10));
 }
