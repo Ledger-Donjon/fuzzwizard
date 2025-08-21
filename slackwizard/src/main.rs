@@ -1,11 +1,12 @@
-use reqwest::{header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE}};
-use serde::{Serialize, Deserialize};
-use std::time::Duration;
 use chrono::{NaiveDate, NaiveDateTime};
+use log::info;
+use reqwest::Url;
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap};
+use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
-use log::info;
+use std::time::Duration;
 //use std::collections::HashMap;
 
 #[derive(Serialize)]
@@ -42,19 +43,19 @@ struct CrashReport {
     input: Vec<u8>,
     filename: String,
     program: Vec<u8>,
-    created_at:NaiveDateTime,
+    created_at: NaiveDateTime,
 }
 
-fn send_message_to_channel(report:CrashReport){
+fn send_message_to_channel(report: CrashReport) {
     let token = std::env::var("SLACK_TOKEN").expect("SLACK_TOKEN must be set");
     let channel = std::env::var("SLACK_CHANNEL").expect("SLACK_CHANNEL must be set");
- 
+
     info!("filename: {}", &report.filename);
 
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
     headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
-    
+
     //let to_send = format!("Nouveau crash for fuzzer {} !\n{}\n```{}```\n",&report.filename, String::from_utf8_lossy(&report.input), String::from_utf8_lossy(&report.report));
     let created_fmt = report.created_at.format("%Y-%m-%dT%H-%M-%S");
     let stem = Path::new(&report.filename)
@@ -66,11 +67,7 @@ fn send_message_to_channel(report:CrashReport){
 
     let to_send = format!(
         "Nouveau crash pour {} (id: {})\n\nPour récupérer les artefacts localement:\n\n$ curl -X POST http://127.0.0.1:3000/collect_crashes -H 'Content-Type: application/json' -d '{}'\n\nLes fichiers seront créés sous {}\n- {} (binaire du programme)\n- crash_info.txt (rapport)\n- crash_input.txt (input)\n",
-        &report.filename,
-        report.id,
-        report.id,
-        dir,
-        &report.filename
+        &report.filename, report.id, report.id, dir, &report.filename
     );
 
     let client = reqwest::blocking::Client::new();
@@ -148,68 +145,74 @@ fn send_message_to_channel(report:CrashReport){
         println!("{:?}", complete.text());
     }
     */
-
 }
 
 fn main() {
+    env_logger::init();
+
     let file_path = "/tmp/fuzzwizzard_date_file.txt";
     let mut file;
-    if Path::new(file_path).exists(){
+    if Path::new(file_path).exists() {
         file = File::open(file_path).unwrap();
-    }
-    else {
+    } else {
         file = File::create(file_path).unwrap();
     }
 
     let mut contents = String::new();
     let _ = file.read_to_string(&mut contents);
 
-    let mut last_date:NaiveDateTime;
-    if contents.is_empty(){
-        last_date = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap();
+    let mut last_crash_date: NaiveDateTime;
+    if contents.is_empty() {
+        last_crash_date = NaiveDate::from_ymd_opt(2025, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+    } else {
+        last_crash_date = NaiveDateTime::parse_from_str(&contents, "%Y-%m-%d %H:%M:%S%.f").unwrap();
     }
-    else{
-        last_date = NaiveDateTime::parse_from_str(&contents, "%Y-%m-%d %H:%M:%S%.f").unwrap();
-    }
 
+    let client = reqwest::blocking::Client::new();
 
-    env_logger::init();
+    loop {
+        let mut url = Url::parse("http://127.0.0.1:3000/crashes").unwrap();
+        url.query_pairs_mut().append_pair(
+            "after",
+            &last_crash_date.format("%Y-%m-%d %H:%M:%S%.f").to_string(),
+        );
 
-    loop{
-
-        let client_crash = reqwest::blocking::Client::new();
         let mut headers_backend = HeaderMap::new();
         headers_backend.insert(CONTENT_TYPE, "application/json".parse().unwrap());
-        let list_crashes=client_crash
-            .post("http://127.0.0.1:3000/get_last_crashes")
-            .headers(headers_backend)
-            .json(&last_date)
-            .send()
-            .unwrap();
-        
-        if list_crashes.status().is_success(){
-            let body = list_crashes.text().unwrap();
-            let current_vec:Vec<CrashReport> = serde_json::from_str(&body).expect("test");
-            info!("received {} crashes", current_vec.len());
-            if !current_vec.is_empty(){
-                for elt in current_vec.iter(){
 
-                    send_message_to_channel(elt.clone());
-                    if last_date < elt.created_at{
-                        last_date = elt.created_at;
-                    }}
+        let response = client.post(url).headers(headers_backend).send().unwrap();
+
+        if response.status().is_success() {
+            let body = response.text().unwrap();
+            let crashes: Vec<CrashReport> = serde_json::from_str(&body).expect("test");
+            info!("received {} crashes", crashes.len());
+            if !crashes.is_empty() {
+                for crash in crashes.iter() {
+                    send_message_to_channel(crash.clone());
+                    if last_crash_date < crash.created_at {
+                        last_crash_date = crash.created_at;
+                    }
+                }
             }
-            
         }
 
         let mut file = OpenOptions::new()
             .write(true)
             .truncate(true)
-            .open(file_path).unwrap();
+            .open(file_path)
+            .unwrap();
 
-        let _ = file.write_all(last_date.format("%Y-%m-%d %H:%M:%S%.f").to_string().as_bytes());
+        file.write_all(
+            last_crash_date
+                .format("%Y-%m-%d %H:%M:%S%.f")
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
 
         std::thread::sleep(Duration::from_secs(10));
-
     }
 }

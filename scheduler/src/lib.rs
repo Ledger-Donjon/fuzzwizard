@@ -187,7 +187,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                     let client = reqwest::blocking::Client::new();
                     let binary = fs::read(task.path.clone())?;
                     let _res = client
-                        .post(format!("{}/upload_crash", self.backend_url))
+                        .post(format!("{}/crashes", self.backend_url))
                         .json(&CrashReport {
                             report: stderr.as_bytes().to_vec(),
                             input: crashing_instance,
