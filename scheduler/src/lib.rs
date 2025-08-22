@@ -130,8 +130,6 @@ impl<C: TargetsCollector> Scheduler<C> {
 
         self.targets = latest_targets;
 
-        // Display running tasks and their uptime
-        self.log_running_tasks();
         Ok(())
     }
 
