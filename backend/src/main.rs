@@ -78,7 +78,7 @@ async fn get_crashes(
         .into_boxed();
 
     if let Some(after) = params.get("after") {
-        match chrono::NaiveDateTime::parse_from_str(after, "%Y-%m-%dT%H:%M:%S") {
+        match chrono::NaiveDateTime::parse_from_str(after, "%Y-%m-%d %H:%M:%S%.f") {
             Ok(after_date) => {
                 query = query.filter(crashes::created_at.gt(after_date));
             }

@@ -183,7 +183,7 @@ fn main() {
         let mut headers_backend = HeaderMap::new();
         headers_backend.insert(CONTENT_TYPE, "application/json".parse().unwrap());
 
-        let response = client.post(url).headers(headers_backend).send().unwrap();
+        let response = client.get(url).headers(headers_backend).send().unwrap();
 
         if response.status().is_success() {
             let body = response.text().unwrap();
