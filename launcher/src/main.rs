@@ -1,8 +1,6 @@
-use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio, Child};
 use std::time::{Duration, Instant};
-
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE};
 use log::info;
@@ -16,16 +14,6 @@ struct ManagedProcess {
 
 fn require_env(name: &str) -> String {
 	std::env::var(name).unwrap_or_else(|_| panic!("{} must be set", name))
-}
-
-fn prompt_targets_path() -> PathBuf {
-	print!("Path to targets directory for scheduler: ");
-	io::stdout().flush().unwrap();
-	let mut input = String::new();
-	io::stdin().read_line(&mut input).unwrap();
-	let trimmed = input.trim();
-	if trimmed.is_empty() { panic!("Targets path is required"); }
-	PathBuf::from(trimmed)
 }
 
 fn spawn_process(name: &str, cmd: &str, args: &[&str]) -> ManagedProcess {
@@ -52,22 +40,38 @@ fn send_slack_alert(token: &str, channel: &str, text: &str) {
 
 fn main() {
 	// Validate env vars
-	let database_url = require_env("DATABASE_URL");
 	let slack_token = require_env("SLACK_TOKEN");
 	let slack_channel = require_env("SLACK_CHANNEL");
-	let _ = database_url; // used by backend/collector
 	
 	env_logger::init();
 
+	// Read config.json from argument or default to ./config.json in /launcher
+	let args: Vec<String> = std::env::args().collect();
+	let config_path = if args.len() > 1 {
+		PathBuf::from(&args[1])
+	} else {
+		PathBuf::from("config.json")
+	};
+	let config_file = std::fs::read_to_string(&config_path)
+		.expect(&format!("Failed to read config file: {}", config_path.display()));
+	let config_json: serde_json::Value = serde_json::from_str(&config_file)
+		.expect("Failed to parse config.json");
+	let scheduler_project_dir = config_json.get("scheduler_path")
+		.expect("scheduler_path missing in config.json")
+		.as_str()
+		.expect("scheduler_path must be a string");
+	let scheduler_config = config_json.get("scheduler_config")
+		.expect("scheduler_config missing in config.json")
+		.as_str()
+		.expect("scheduler_config must be a string");
 	// Ask for scheduler path
-	let scheduler_project_dir = prompt_targets_path();
-	info!("Scheduler project: {}", scheduler_project_dir.display());
+	info!("Scheduler project: {}", scheduler_project_dir);
 
 	// Spawn backend
 	let mut procs: Vec<ManagedProcess> = Vec::new();
 	procs.push(spawn_process("backend", "cargo", &["run", "-p", "backend"]));
 	info!("backend launched");
-	std::thread::sleep(Duration::from_secs(5));
+	std::thread::sleep(Duration::from_secs(3));
 	// Spawn slackwizard
 	procs.push(spawn_process("slackwizard", "cargo", &["run", "-p", "slackwizard"]));
 	info!("slackwizard launched");
@@ -77,11 +81,15 @@ fn main() {
 		.env("RUST_LOG", "info")
 		.current_dir(&scheduler_project_dir)
 		.arg("run")
+		.arg(scheduler_config.to_string())
 		.stdout(Stdio::inherit())
 		.stderr(Stdio::inherit())
 		.spawn()
 		.expect("failed to spawn scheduler project");
 	let scheduler_started = Instant::now();
+	
+	std::thread::sleep(Duration::from_secs(2));
+
 
 	loop {
 		// Monitor spawned processes

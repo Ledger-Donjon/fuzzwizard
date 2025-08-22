@@ -1619,6 +1619,7 @@ name = "scheduler"
 version = "0.1.0"
 dependencies = [
  "assert_fs",
+ "env_logger",
  "log",
  "reqwest",
  "serde",
