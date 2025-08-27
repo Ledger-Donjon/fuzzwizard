@@ -198,7 +198,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                     // Send crashing input to the backend
                     let client = reqwest::blocking::Client::new();
                     let binary = fs::read(task.path.clone())?;
-                    let res = client
+                    let _res = client
                         .post(format!("{}/crashes", self.backend_url))
                         .json(&CrashReport {
                             report: stderr.as_bytes().to_vec(),
@@ -208,7 +208,6 @@ impl<C: TargetsCollector> Scheduler<C> {
                             scheduler_name: self.scheduler_name.clone(),
                         })
                         .send()?;
-                    info!("res: {:?}", res.status());
                     tasks_to_remove.push(*hash);
                 }
                 Err(e) => return Err(SchedulerError::Io(e)),
