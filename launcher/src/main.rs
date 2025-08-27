@@ -26,7 +26,10 @@ fn spawn_process(name: &str, cmd: &str, args: &[&str]) -> ManagedProcess {
 	ManagedProcess { name: name.to_string(), child, started_at: Instant::now() }
 }
 
-fn send_slack_alert(token: &str, channel: &str, text: &str) {
+fn send_slack_alert(token: &str, channel: &str, text: &str, should_send: bool) {
+	if !should_send {
+		return;
+	}
 	let mut headers = HeaderMap::new();
 	headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
 	headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
@@ -56,6 +59,10 @@ fn main() {
 		.expect(&format!("Failed to read config file: {}", config_path.display()));
 	let config_json: serde_json::Value = serde_json::from_str(&config_file)
 		.expect("Failed to parse config.json");
+	let should_send_slack_alert = config_json.get("slack_alert")
+		.expect("should_send_slack_alert missing in config.json")
+		.as_bool()
+		.expect("should_send_slack_alert must be a boolean");
 	// Support multiple schedulers: config_json["schedulers"] is an array of objects with scheduler_path and scheduler_config
 	let schedulers = config_json.get("schedulers")
 		.expect("schedulers missing in config.json")
@@ -71,8 +78,10 @@ fn main() {
 	info!("backend launched");
 	std::thread::sleep(Duration::from_secs(3));
 	// Spawn slackwizard
-	procs.push(spawn_process("slackwizard", "cargo", &["run", "-p", "slackwizard"]));
-	info!("slackwizard launched");
+	if should_send_slack_alert {
+		procs.push(spawn_process("slackwizard", "cargo", &["run", "-p", "slackwizard"]));
+		info!("slackwizard launched");
+	}
 
 	// Spawn scheduler project via `cargo run` in provided directory
 	// Launch all schedulers in the array, collect their children and start times
@@ -110,7 +119,7 @@ fn main() {
 				procs.remove(i);
 				let text = format!("Process {} exited with {:?} after {}s", name, status.code(), uptime);
 				info!("{}", text);
-				send_slack_alert(&slack_token, &slack_channel, &text);
+				send_slack_alert(&slack_token, &slack_channel, &text, should_send_slack_alert);
 			}
 		}
 		// Vérifie si les child de tous les scheduler_children sont encore en cours
@@ -120,7 +129,7 @@ fn main() {
 				let uptime = started_at.elapsed().as_secs();
 				let text = format!("Scheduler {} exited with {:?} after {}s", scheduler_name, status.code(), uptime);
 				info!("{}", text);
-				send_slack_alert(&slack_token, &slack_channel, &text);
+				send_slack_alert(&slack_token, &slack_channel, &text, should_send_slack_alert);
 				scheduler_children.remove(i);
 			}
 		}
