@@ -44,6 +44,7 @@ struct AddCrashReport {
     input: Vec<u8>,
     filename: String,
     program: Vec<u8>,
+    scheduler_name: String,
 }
 
 #[derive(Deserialize, Serialize, Queryable, Selectable)]
@@ -54,6 +55,7 @@ struct CrashReportWithId {
     input: Vec<u8>,
     filename: String,
     program: Vec<u8>,
+    scheduler_name: String,
     created_at: NaiveDateTime,
 }
 
@@ -64,6 +66,7 @@ struct CrashReport {
     input: Vec<u8>,
     filename: String,
     program: Vec<u8>,
+    scheduler_name: String,
     created_at: NaiveDateTime,
 }
 

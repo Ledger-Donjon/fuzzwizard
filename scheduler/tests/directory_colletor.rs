@@ -34,8 +34,9 @@ fn directory_collector() {
     };
 
     let corpus_dir = std::env::temp_dir();
+    let crashes_dir = std::env::temp_dir().join("crashes");
     let backend_url = "http://127.0.0.1:0".to_string();
-    let mut scheduler = Scheduler::new(collector, corpus_dir, backend_url);
+    let mut scheduler = Scheduler::new(collector, corpus_dir, crashes_dir, backend_url, "test_scheduler".to_string());
 
     let a_sh = temp_dir.child("a.sh");
     a_sh.write_str(

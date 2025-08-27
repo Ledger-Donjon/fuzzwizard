@@ -56,16 +56,14 @@ fn main() {
 		.expect(&format!("Failed to read config file: {}", config_path.display()));
 	let config_json: serde_json::Value = serde_json::from_str(&config_file)
 		.expect("Failed to parse config.json");
-	let scheduler_project_dir = config_json.get("scheduler_path")
-		.expect("scheduler_path missing in config.json")
-		.as_str()
-		.expect("scheduler_path must be a string");
-	let scheduler_config = config_json.get("scheduler_config")
-		.expect("scheduler_config missing in config.json")
-		.as_str()
-		.expect("scheduler_config must be a string");
-	// Ask for scheduler path
-	info!("Scheduler project: {}", scheduler_project_dir);
+	// Support multiple schedulers: config_json["schedulers"] is an array of objects with scheduler_path and scheduler_config
+	let schedulers = config_json.get("schedulers")
+		.expect("schedulers missing in config.json")
+		.as_array()
+		.expect("schedulers must be an array");
+	if schedulers.is_empty() {
+		panic!("schedulers array in config.json must not be empty");
+	}
 
 	// Spawn backend
 	let mut procs: Vec<ManagedProcess> = Vec::new();
@@ -77,17 +75,29 @@ fn main() {
 	info!("slackwizard launched");
 
 	// Spawn scheduler project via `cargo run` in provided directory
-	let mut scheduler_child = Command::new("cargo")
-		.env("RUST_LOG", "info")
-		.current_dir(&scheduler_project_dir)
-		.arg("run")
-		.arg(scheduler_config.to_string())
-		.stdout(Stdio::inherit())
-		.stderr(Stdio::inherit())
-		.spawn()
-		.expect("failed to spawn scheduler project");
-	let scheduler_started = Instant::now();
-	
+	// Launch all schedulers in the array, collect their children and start times
+	let mut scheduler_children: Vec<(std::process::Child, Instant, String)> = Vec::new();
+	for scheduler in schedulers {
+		let scheduler_project_dir = scheduler.get("scheduler_path")
+			.expect("scheduler_path missing in scheduler")
+			.as_str()
+			.expect("scheduler_path must be a string");
+		let scheduler_config = scheduler.get("scheduler_config")
+			.expect("scheduler_config missing in scheduler")
+			.as_str()
+			.expect("scheduler_config must be a string");
+		info!("Launching scheduler: {} with config {}", scheduler_project_dir, scheduler_config);
+		let child = Command::new("cargo")
+			.env("RUST_LOG", "info")
+			.current_dir(&scheduler_project_dir)
+			.arg("run")
+			.arg(scheduler_config.to_string())
+			.stdout(Stdio::inherit())
+			.stderr(Stdio::inherit())
+			.spawn()
+			.expect("failed to spawn scheduler project");
+		scheduler_children.push((child, Instant::now(), scheduler_project_dir.to_string()));
+	}
 	std::thread::sleep(Duration::from_secs(2));
 
 
@@ -103,19 +113,27 @@ fn main() {
 				send_slack_alert(&slack_token, &slack_channel, &text);
 			}
 		}
-		if let Some(status) = scheduler_child.try_wait().unwrap() {
-			let uptime = scheduler_started.elapsed().as_secs();
-			let text = format!("Scheduler project exited with {:?} after {}s", status.code(), uptime);
-			info!("{}", text);
-			send_slack_alert(&slack_token, &slack_channel, &text);
-			break;
+		// Vérifie si les child de tous les scheduler_children sont encore en cours
+		for i in (0..scheduler_children.len()).rev() {
+			let (child, started_at, scheduler_name) = &mut scheduler_children[i];
+			if let Some(status) = child.try_wait().unwrap() {
+				let uptime = started_at.elapsed().as_secs();
+				let text = format!("Scheduler {} exited with {:?} after {}s", scheduler_name, status.code(), uptime);
+				info!("{}", text);
+				send_slack_alert(&slack_token, &slack_channel, &text);
+				scheduler_children.remove(i);
+			}
 		}
 
 		// Display running processes uptime
 		for p in procs.iter() {
 			info!("{} running for {}s", p.name, p.started_at.elapsed().as_secs());
 		}
-		info!("scheduler running for {}s", scheduler_started.elapsed().as_secs());
+
+		// Display running scheduler uptime
+		for (_, started_at, scheduler_name) in scheduler_children.iter() {
+			info!("Scheduler {} running for {}s", scheduler_name, started_at.elapsed().as_secs());
+		}
 
 		std::thread::sleep(Duration::from_secs(5));
 	}

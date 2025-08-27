@@ -1,5 +1,9 @@
 {
-    "scheduler_path": "./scheduler",
-    "scheduler_config": "./tests/test_targets/scheduler_config.json",
+    "schedulers": [
+        {
+            "scheduler_path": "./scheduler",
+            "scheduler_config": "./tests/test_targets/scheduler_config.json"
+        }
+    ],
     "database_url": "postgres://postgres:postgres@127.0.0.1:5432/fuzzwizard"
 }

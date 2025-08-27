@@ -1,6 +1,8 @@
 {
-  "targets_directory": "./tests/test_targets/buffer_overflow/build",
+  "scheduler_name": "internal_test_scheduler",
+  "targets_directory": "./tests/test_targets/test_fuzzers/build",
   "build_script": "./tests/test_targets/build_and_collect.sh",
   "backend_url": "http://127.0.0.1:3000",
-  "corpus_directory": "/tmp/corpus"
+  "corpus_directory": "/tmp/corpus",
+  "crashes_directory": "/tmp/crashes"
 }

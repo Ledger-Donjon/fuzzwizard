@@ -7,6 +7,7 @@ diesel::table! {
         report -> Bytea,
         filename -> Text,
         program -> Bytea,
+        scheduler_name -> Text,
         created_at -> Timestamp,
     }
 }

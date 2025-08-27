@@ -50,19 +50,25 @@ pub struct Scheduler<C: TargetsCollector> {
     tasks: HashMap<Sha, Task>,
     /// Directory where fuzzer corpuses are stored
     corpus_directory: PathBuf,
+    /// Directory where fuzzer crashes are stored
+    crashes_directory: PathBuf,
     /// URL of the backend to report crashes
     backend_url: String,
+    /// Name of the scheduler
+    scheduler_name: String,
 }
 
 impl<C: TargetsCollector> Scheduler<C> {
     /// Create a new [`Scheduler`].
-    pub fn new(collector: C, corpus_directory: PathBuf, backend_url: String) -> Self {
+    pub fn new(collector: C, corpus_directory: PathBuf, crashes_directory: PathBuf, backend_url: String, scheduler_name: String) -> Self {
         Self {
             collector,
             targets: HashMap::new(),
             tasks: HashMap::new(),
             corpus_directory,
+            crashes_directory,
             backend_url,
+            scheduler_name,
         }
     }
 
@@ -141,9 +147,17 @@ impl<C: TargetsCollector> Scheduler<C> {
         if !fuzzer_corpus.exists() {
             fs::create_dir_all(&fuzzer_corpus)?;
         }
+        let fuzzer_crashdir = self.crashes_directory.join(fuzzer_name);
+        if !fuzzer_crashdir.exists() {
+            fs::create_dir_all(&fuzzer_crashdir)?;
+        }
+
 
         let mut child = Command::new(&fuzzer_path)
-            .args(&[fuzzer_corpus.display().to_string()])
+            .args(&[
+                &fuzzer_corpus.display().to_string(),
+                &format!("-artifact_prefix={}", fuzzer_crashdir.display())
+            ])
             .stderr(Stdio::piped())
             .spawn()?;
 
@@ -168,7 +182,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                 Ok(Some(_)) => {
                     let mut stderr = String::new();
                     task.stderr.read_to_string(&mut stderr)?;
-                    info!("crash stderr: {:?}", stderr);
+                    //info!("crash stderr: {:?}", stderr);
 
                     // Get crashing corpus instance
                     let crash = stderr
@@ -184,16 +198,17 @@ impl<C: TargetsCollector> Scheduler<C> {
                     // Send crashing input to the backend
                     let client = reqwest::blocking::Client::new();
                     let binary = fs::read(task.path.clone())?;
-                    let _res = client
+                    let res = client
                         .post(format!("{}/crashes", self.backend_url))
                         .json(&CrashReport {
                             report: stderr.as_bytes().to_vec(),
                             input: crashing_instance,
                             filename: task.path.display().to_string(),
                             program: binary,
+                            scheduler_name: self.scheduler_name.clone(),
                         })
                         .send()?;
-
+                    info!("res: {:?}", res.status());
                     tasks_to_remove.push(*hash);
                 }
                 Err(e) => return Err(SchedulerError::Io(e)),
@@ -247,4 +262,5 @@ struct CrashReport {
     input: Vec<u8>,
     filename: String,
     program: Vec<u8>,
+    scheduler_name: String,
 }

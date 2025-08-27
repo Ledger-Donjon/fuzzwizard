@@ -84,8 +84,13 @@ fn main() {
 
     let config_contents = fs::read_to_string(config_path)
         .expect("Failed to read config file");
+
     let config_json: serde_json::Value = serde_json::from_str(&config_contents)
         .expect("Failed to parse config file as JSON");
+    let scheduler_name = config_json.get("scheduler_name")
+        .expect("Missing 'scheduler_name' in config")
+        .as_str()
+        .expect("'scheduler_name' should be a string");
     let targets_directory = config_json.get("targets_directory")
         .expect("Missing 'targets_directory' in config")
         .as_str()
@@ -104,8 +109,12 @@ fn main() {
         .expect("Missing 'corpus_directory' in config")
         .as_str()
         .expect("'corpus_directory' should be a string");
+    let crashes_directory = config_json.get("crashes_directory")
+        .expect("Missing 'crashes_directory' in config")
+        .as_str()
+        .expect("'crashes_directory' should be a string");
     build_targets(config_json.clone()); 
-    let mut scheduler = Scheduler::new(collector, corpus_directory.into(), backend_url.to_string());
+    let mut scheduler = Scheduler::new(collector, corpus_directory.into(), crashes_directory.into(), backend_url.to_string(), scheduler_name.to_string());
 
     loop {
         build_targets(config_json.clone());
