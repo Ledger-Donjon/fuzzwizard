@@ -9,6 +9,8 @@ use std::{
     process::{Child, ChildStderr, Command, Stdio},
 };
 use thiserror::Error;
+use rand::Rng;
+use std::io::Write;
 
 /// Errors that can occur within the scheduler crate
 #[derive(Debug, Error)]
@@ -146,6 +148,13 @@ impl<C: TargetsCollector> Scheduler<C> {
         let fuzzer_corpus = self.corpus_directory.join(fuzzer_name);
         if !fuzzer_corpus.exists() {
             fs::create_dir_all(&fuzzer_corpus)?;
+            //TODO : init with a random file here
+            let random_file = fuzzer_corpus.join("crash_init");
+            let mut file = fs::File::create(random_file)?;
+            let mut rng = rand::thread_rng();
+            let mut data = [0u8; 32];
+            rng.fill(&mut data);
+            file.write_all(&data)?;
         }
         let fuzzer_crashdir = self.crashes_directory.join(fuzzer_name);
         if !fuzzer_crashdir.exists() {
@@ -156,7 +165,7 @@ impl<C: TargetsCollector> Scheduler<C> {
         let mut child = Command::new(&fuzzer_path)
             .args(&[
                 &fuzzer_corpus.display().to_string(),
-                &format!("-artifact_prefix={}", fuzzer_crashdir.display())
+                &format!("-artifact_prefix={}{}", fuzzer_crashdir.display().to_string(), "/")
             ])
             .stderr(Stdio::piped())
             .spawn()?;
