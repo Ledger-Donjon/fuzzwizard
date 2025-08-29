@@ -151,8 +151,8 @@ impl<C: TargetsCollector> Scheduler<C> {
             //TODO : init with a random file here
             let random_file = fuzzer_corpus.join("crash_init");
             let mut file = fs::File::create(random_file)?;
-            let mut rng = rand::thread_rng();
-            let mut data = [0u8; 32];
+            let mut rng = rand::rng();
+            let mut data: [u8; 4000] = [0u8; 4000];
             rng.fill(&mut data);
             file.write_all(&data)?;
         }
