@@ -243,10 +243,16 @@ impl<C: TargetsCollector> Scheduler<C> {
         }
         info!("Running tasks:");
         for (_sha, task) in self.tasks.iter() {
+            let secs = task.started_at.elapsed().as_secs();
+            let hours = secs / 3600;
+            let minutes = (secs % 3600) / 60;
+            let seconds = secs % 60;
             info!(
-                "- {} running for {}s",
+                "- '{}' has been running for {:02}:{:02}:{:02} (H:M:S)",
                 task.path.display(),
-                task.started_at.elapsed().as_secs()
+                hours,
+                minutes,
+                seconds
             );
         }
     }

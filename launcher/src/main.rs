@@ -133,17 +133,31 @@ fn main() {
 				scheduler_children.remove(i);
 			}
 		}
+		
+		// Display running processes and schedulers uptime in a single message, formatted as H:M:S
+		let mut status_lines = Vec::new();
 
-		// Display running processes uptime
 		for p in procs.iter() {
-			info!("{} running for {}s", p.name, p.started_at.elapsed().as_secs());
+			let secs = p.started_at.elapsed().as_secs();
+			let hours = secs / 3600;
+			let minutes = (secs % 3600) / 60;
+			let seconds = secs % 60;
+			status_lines.push(format!("Process '{}' running for {:02}:{:02}:{:02}", p.name, hours, minutes, seconds));
 		}
 
-		// Display running scheduler uptime
 		for (_, started_at, scheduler_name) in scheduler_children.iter() {
-			info!("Scheduler {} running for {}s", scheduler_name, started_at.elapsed().as_secs());
+			let secs = started_at.elapsed().as_secs();
+			let hours = secs / 3600;
+			let minutes = (secs % 3600) / 60;
+			let seconds = secs % 60;
+			status_lines.push(format!("Scheduler '{}' running for {:02}:{:02}:{:02}", scheduler_name, hours, minutes, seconds));
 		}
 
-		std::thread::sleep(Duration::from_secs(5));
+		if !status_lines.is_empty() {
+			let message = status_lines.join("\n");
+			info!("Current running processes and schedulers:\n{}", message);
+		}
+
+		std::thread::sleep(Duration::from_secs(60));
 	}
 } 

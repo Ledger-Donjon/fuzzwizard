@@ -119,7 +119,7 @@ fn main() {
     loop {
         build_targets(config_json.clone());
         let _ = scheduler.update();
-        std::thread::sleep(std::time::Duration::from_secs(3));
+        std::thread::sleep(std::time::Duration::from_secs(60));
         scheduler.report_crashes().unwrap();
         scheduler.log_running_tasks();
     }
