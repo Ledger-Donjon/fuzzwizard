@@ -152,7 +152,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             let random_file = fuzzer_corpus.join("crash_init");
             let mut file = fs::File::create(random_file)?;
             let mut rng = rand::rng();
-            let mut data: [u8; 4000] = [0u8; 4000];
+            let mut data: [u8; 8192] = [0u8; 8192];
             rng.fill(&mut data);
             file.write_all(&data)?;
         }
