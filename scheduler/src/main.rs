@@ -85,6 +85,20 @@ fn main() {
     let config_contents = fs::read_to_string(config_path)
         .expect("Failed to read config file");
 
+    let logdir = env::args().nth(2);
+    let logdir = match logdir {
+        Some(ref path) if !path.trim().is_empty() => path.trim(),
+        _ => {
+            info!("Log directory not provided, using default ./logs");
+            "./logs"
+        }
+    };
+    // If logdir does not exist, create it
+    if let Err(e) = std::fs::create_dir_all(logdir) {
+        error!("Failed to create log directory '{}': {}", logdir, e);
+        std::process::exit(1);
+    }
+
     let config_json: serde_json::Value = serde_json::from_str(&config_contents)
         .expect("Failed to parse config file as JSON");
     let scheduler_name = config_json.get("scheduler_name")
@@ -118,7 +132,7 @@ fn main() {
 
     loop {
         build_targets(config_json.clone());
-        let _ = scheduler.update();
+        let _ = scheduler.update(logdir);
         std::thread::sleep(std::time::Duration::from_secs(60));
         scheduler.report_crashes().unwrap();
         scheduler.log_running_tasks();

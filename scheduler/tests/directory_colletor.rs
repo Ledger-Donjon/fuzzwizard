@@ -64,7 +64,7 @@ done
     .unwrap();
     fs::set_permissions(b_sh.path(), fs::Permissions::from_mode(0o775)).unwrap();
 
-    let _ = scheduler.update();
+    let _ = scheduler.update("./logs");
 
     std::thread::sleep(Duration::from_secs(10));
 
@@ -83,7 +83,7 @@ done
     .unwrap();
     fs::set_permissions(c_sh.path(), fs::Permissions::from_mode(0o775)).unwrap();
 
-    let _ = scheduler.update();
+    let _ = scheduler.update("./logs");
 
     std::thread::sleep(Duration::from_secs(10));
 }

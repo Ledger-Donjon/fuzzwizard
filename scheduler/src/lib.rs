@@ -11,6 +11,8 @@ use std::{
 use thiserror::Error;
 use rand::Rng;
 use std::io::Write;
+use std::fmt::Write as _;
+use chrono::prelude::*;
 
 /// Errors that can occur within the scheduler crate
 #[derive(Debug, Error)]
@@ -60,6 +62,15 @@ pub struct Scheduler<C: TargetsCollector> {
     scheduler_name: String,
 }
 
+fn to_hex_prefixed(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(2 * bytes.len() + 2);
+    s.push_str("0x");
+    for &b in bytes {
+        write!(&mut s, "{:02x}", b).unwrap();
+    }
+    s
+}
+
 impl<C: TargetsCollector> Scheduler<C> {
     /// Create a new [`Scheduler`].
     pub fn new(collector: C, corpus_directory: PathBuf, crashes_directory: PathBuf, backend_url: String, scheduler_name: String) -> Self {
@@ -75,7 +86,7 @@ impl<C: TargetsCollector> Scheduler<C> {
     }
 
     /// Update the scheduler with the latest targets collected by the collector.
-    pub fn update(&mut self) -> Result<()> {
+    pub fn update(&mut self, logdir: &str) -> Result<()> {
         let latest_targets = self.collector.collect_targets();
 
         debug!("latest_targets: {:?}", latest_targets);
@@ -99,6 +110,10 @@ impl<C: TargetsCollector> Scheduler<C> {
         }
 
         debug!("targets_to_start: {:?}", targets_to_start);
+        let mut logfile = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(format!("{}/running_tasks.log", logdir))?;
 
         for &target in targets_to_start {
             let Some(path) = latest_targets.get(target) else {
@@ -109,6 +124,8 @@ impl<C: TargetsCollector> Scheduler<C> {
             let fuzzer_path = path.canonicalize()?;
             let task = self.start_task(fuzzer_path)?;
             self.tasks.insert(*target, task);
+            let current_date = Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
+            writeln!(logfile, "[{}]{} : {}", current_date, path.display(), to_hex_prefixed(target))?;
         }
 
         for &target in targets_to_check {

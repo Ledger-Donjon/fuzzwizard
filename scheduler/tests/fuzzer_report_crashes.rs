@@ -35,7 +35,7 @@ fn fuzzer_report_crashes() {
     let backend_url = "http://127.0.0.1:0".to_string();
     let mut scheduler = Scheduler::new(collector, corpus_dir, crashes_dir, backend_url, "test_scheduler".to_string());
 
-    let _ = scheduler.update();
+    let _ = scheduler.update("./logs");
 
     std::thread::sleep(Duration::from_secs(1));
     let _ = scheduler.report_crashes();

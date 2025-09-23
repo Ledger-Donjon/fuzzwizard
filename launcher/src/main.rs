@@ -71,7 +71,10 @@ fn main() {
 	if schedulers.is_empty() {
 		panic!("schedulers array in config.json must not be empty");
 	}
-
+	let logdir = config_json.get("logdir")
+		.expect("logdir missing in config.json")
+		.as_str()
+		.expect("logdir must be a string");
 	// Spawn backend
 	let mut procs: Vec<ManagedProcess> = Vec::new();
 	procs.push(spawn_process("backend", "cargo", &["run", "-p", "backend"]));
@@ -101,6 +104,7 @@ fn main() {
 			.current_dir(&scheduler_project_dir)
 			.arg("run")
 			.arg(scheduler_config.to_string())
+			.arg(logdir.to_string())
 			.stdout(Stdio::inherit())
 			.stderr(Stdio::inherit())
 			.spawn()
