@@ -51,3 +51,21 @@ What it does:
 - Launches backend and slackwizard
 - Monitors processes, sends a Slack alert if a process exits
 - Displays running scheduler-driven processes and their uptime
+
+
+Questions pour demain: 
+* pour le coverage; est ce qu'on l'intégre directement dans les projets ou est ce qu'on l'integre dans le patch 
+* Gérer le rapport de coverage
+* Docker de debug ? 
+* Améliorer dossier de config
+* Ajouter un log quand on lance un nouveau fuzzer avec son hash
+* Ajouter un scheduler pour le V
+
+DONE: 
+* multiple scheduler or multiple directory avec un level de priorité
+* slack configuration
+* Add random init file in corpus directory 
+* Faire un patch avec le token en $ENV
+* Regler le probleme de CORPUS
+
+
