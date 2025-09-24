@@ -3,7 +3,7 @@ use std::process::{Command, Stdio, Child};
 use std::time::{Duration, Instant};
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE};
-use log::info;
+use log::{info, error};
 
 #[derive(Debug)]
 struct ManagedProcess {
@@ -141,6 +141,28 @@ fn main() {
 			.expect("schedulers missing in config.json")
 			.as_array()
 			.expect("schedulers must be an array");
+
+		// If a scheduler is running but no longer present in the config, stop it
+		let scheduler_names_in_config: std::collections::HashSet<String> = schedulers.iter()
+			.map(|s| s.get("scheduler_name")
+				.map(|v| v.as_str().unwrap_or("unnamed_scheduler").to_string())
+				.unwrap_or("unnamed_scheduler".to_string()))
+			.collect();
+
+		// Remove and kill scheduler processes whose name is not in the config anymore
+		for i in (0..scheduler_processes.len()).rev() {
+			let (scheduler_name, _started_at, child) = &mut scheduler_processes[i];
+			if !scheduler_names_in_config.contains(scheduler_name) {
+				info!("Stopping scheduler '{}' as it is no longer present in the config.", scheduler_name);
+				// Try to terminate the process gracefully
+				if let Err(e) = child.kill() {
+					error!("Failed to kill scheduler '{}': {}", scheduler_name, e);
+				}
+				// Wait for the process to exit to avoid zombies
+				let _ = child.wait();
+				scheduler_processes.remove(i);
+			}
+		}
 
 		// For each scheduler in config, check if it's already running, if not, launch it
 		for scheduler in schedulers {
