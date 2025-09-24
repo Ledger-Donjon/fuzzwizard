@@ -259,14 +259,17 @@ impl<C: TargetsCollector> Scheduler<C> {
             return;
         }
         info!("Running tasks:");
-        for (_sha, task) in self.tasks.iter() {
+        for (sha, task) in self.tasks.iter() {
             let secs = task.started_at.elapsed().as_secs();
-            let hours = secs / 3600;
+            let days = secs / 86400;
+            let hours = (secs % 86400) / 3600;
             let minutes = (secs % 3600) / 60;
             let seconds = secs % 60;
             info!(
-                "- '{}' has been running for {:02}:{:02}:{:02} (H:M:S)",
+                "- '{}:{}' has been running for {}days {:02}:{:02}:{:02} (J:H:M:S)",
                 task.path.display(),
+                to_hex_prefixed(sha),
+                days,
                 hours,
                 minutes,
                 seconds
