@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::process::{Command, Stdio, Child};
 use std::time::{Duration, Instant};
+use chrono::TimeDelta;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE};
 use log::{info, error};
@@ -90,15 +91,15 @@ fn main() {
 	// Launch all schedulers in the array, collect their children and start times
 	let mut scheduler_processes: Vec<(String, Instant, std::process::Child)> = Vec::new();
 	for scheduler in schedulers {
-		let scheduler_project_dir = scheduler.get("scheduler_path")
+		let scheduler_project_dir = scheduler.get("path")
 			.expect("scheduler_path missing in scheduler")
 			.as_str()
 			.expect("scheduler_path must be a string");
-		let scheduler_config = scheduler.get("scheduler_config")
+		let scheduler_config = scheduler.get("config")
 			.expect("scheduler_config missing in scheduler")
 			.as_str()
 			.expect("scheduler_config must be a string");
-		let scheduler_name = scheduler.get("scheduler_name")
+		let scheduler_name = scheduler.get("name")
 			.map(|v| v.as_str().unwrap_or("unnamed_scheduler"))
 			.unwrap_or("unnamed_scheduler")
 			.to_string();
@@ -120,6 +121,7 @@ fn main() {
 
 
 	loop {
+		std::thread::sleep(Duration::from_secs(10));
 		// Monitor spawned processes
 		for i in (0..procs.len()).rev() {
 			if let Some(status) = procs[i].child.try_wait().unwrap() {
@@ -133,18 +135,37 @@ fn main() {
 		}
 		// Synchronize scheduler_processes with the config file in case a new scheduler is added at runtime.
 		// Reload config file
-		let config_file = std::fs::read_to_string(&config_path)
-			.expect(&format!("Failed to read config file: {}", config_path.display()));
-		let config_json: serde_json::Value = serde_json::from_str(&config_file)
-			.expect("Failed to parse config.json");
-		let schedulers = config_json.get("schedulers")
-			.expect("schedulers missing in config.json")
-			.as_array()
-			.expect("schedulers must be an array");
+		let config_file = match std::fs::read_to_string(&config_path) {
+			Ok(contents) => contents,
+			Err(e) => {
+				eprintln!("\x1b[31m[Error] Could not read config file '{}': {}, config is not updated\x1b[0m", config_path.display(), e);
+				continue;
+			}
+		};
+		let config_json: serde_json::Value = match serde_json::from_str(&config_file) {
+			Ok(json) => json,
+			Err(e) => {
+				eprintln!("\x1b[31m[Error] Failed to parse config.json: {}, config is not updated\x1b[0m", e);
+				continue;
+			}
+		};
+		let schedulers = match config_json.get("schedulers") {
+			Some(s) => match s.as_array() {
+				Some(arr) => arr,
+				None => {
+					eprintln!("\x1b[31m[Error] 'schedulers' must be an array in config.json, config is not updated\x1b[0m");
+					continue;
+				}
+			},
+			None => {
+				eprintln!("\x1b[31m[Error] 'schedulers' missing in config.json, config is not updated\x1b[0m");
+				continue;
+			}
+		};
 
 		// If a scheduler is running but no longer present in the config, stop it
 		let scheduler_names_in_config: std::collections::HashSet<String> = schedulers.iter()
-			.map(|s| s.get("scheduler_name")
+			.map(|s| s.get("name")
 				.map(|v| v.as_str().unwrap_or("unnamed_scheduler").to_string())
 				.unwrap_or("unnamed_scheduler".to_string()))
 			.collect();
@@ -166,17 +187,17 @@ fn main() {
 
 		// For each scheduler in config, check if it's already running, if not, launch it
 		for scheduler in schedulers {
-			let scheduler_name = scheduler.get("scheduler_name")
+			let scheduler_name = scheduler.get("name")
 				.map(|v| v.as_str().unwrap_or("unnamed_scheduler"))
 				.unwrap_or("unnamed_scheduler")
 				.to_string();
 			let already_running = scheduler_processes.iter().any(|(name, _, _)| *name == scheduler_name);
 			if !already_running {
-				let scheduler_project_dir = scheduler.get("scheduler_path")
+				let scheduler_project_dir = scheduler.get("path")
 					.expect("scheduler_path missing in scheduler")
 					.as_str()
 					.expect("scheduler_path must be a string");
-				let scheduler_config = scheduler.get("scheduler_config")
+				let scheduler_config = scheduler.get("config")
 					.expect("scheduler_config missing in scheduler")
 					.as_str()
 					.expect("scheduler_config must be a string");
@@ -200,7 +221,8 @@ fn main() {
 			let (scheduler_name, started_at, child) = &mut scheduler_processes[i];
 			if let Some(status) = child.try_wait().unwrap() {
 				let uptime = started_at.elapsed().as_secs();
-				let text = format!("Scheduler {} exited with {:?} after {}s.", scheduler_name, status.code(), uptime);
+				let d = TimeDelta::new(uptime as i64, 0).expect("Failed to create TimeDelta");
+				let text = format!("Scheduler {} exited with {:?} after {:?}.", scheduler_name, status.code(), d.to_std());
 				info!("{}", text);
 				send_slack_alert(&slack_token, &slack_channel, &text, should_send_slack_alert);
 				scheduler_processes.remove(i);
@@ -212,25 +234,19 @@ fn main() {
 
 		for p in procs.iter() {
 			let secs = p.started_at.elapsed().as_secs();
-			let hours = secs / 3600;
-			let minutes = (secs % 3600) / 60;
-			let seconds = secs % 60;
-			status_lines.push(format!("Process '{}' running for {:02}:{:02}:{:02}", p.name, hours, minutes, seconds));
+			let d = TimeDelta::new(secs as i64, 0).expect("Failed to create TimeDelta").to_std();
+			status_lines.push(format!("Process '{}' running for {:?}", p.name, d));
 		}
 
 		for (scheduler_name, started_at		, _) in scheduler_processes.iter() {
 			let secs = started_at.elapsed().as_secs();
-			let hours = secs / 3600;
-			let minutes = (secs % 3600) / 60;
-			let seconds = secs % 60;
-			status_lines.push(format!("Scheduler '{}' running for {:02}:{:02}:{:02}", scheduler_name, hours, minutes, seconds));
+			let d = TimeDelta::new(secs as i64, 0).expect("Failed to create TimeDelta").to_std();
+			status_lines.push(format!("Scheduler '{}' running for {:?}", scheduler_name, d));
 		}
 
 		if !status_lines.is_empty() {
 			let message = status_lines.join("\n");
 			info!("Current running processes and schedulers:\n{}", message);
-		}
-
-		std::thread::sleep(Duration::from_secs(60));
+		}	
 	}
 } 

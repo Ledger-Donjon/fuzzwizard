@@ -11,8 +11,8 @@ use std::{
 use thiserror::Error;
 use rand::Rng;
 use std::io::Write;
-use std::fmt::Write as _;
-use chrono::prelude::*;
+use chrono::{prelude::*, TimeDelta};
+use hex;
 
 /// Errors that can occur within the scheduler crate
 #[derive(Debug, Error)]
@@ -60,15 +60,6 @@ pub struct Scheduler<C: TargetsCollector> {
     backend_url: String,
     /// Name of the scheduler
     scheduler_name: String,
-}
-
-fn to_hex_prefixed(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(2 * bytes.len() + 2);
-    s.push_str("0x");
-    for &b in bytes {
-        write!(&mut s, "{:02x}", b).unwrap();
-    }
-    s
 }
 
 impl<C: TargetsCollector> Scheduler<C> {
@@ -125,7 +116,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             let task = self.start_task(fuzzer_path)?;
             self.tasks.insert(*target, task);
             let current_date = Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
-            writeln!(logfile, "[{}]{} : {}", current_date, path.display(), to_hex_prefixed(target))?;
+            writeln!(logfile, "[{}]{} : 0x{}", current_date, path.display(), hex::encode(target))?;
         }
 
         for &target in targets_to_check {
@@ -261,18 +252,12 @@ impl<C: TargetsCollector> Scheduler<C> {
         info!("Running tasks:");
         for (sha, task) in self.tasks.iter() {
             let secs = task.started_at.elapsed().as_secs();
-            let days = secs / 86400;
-            let hours = (secs % 86400) / 3600;
-            let minutes = (secs % 3600) / 60;
-            let seconds = secs % 60;
+            let d = TimeDelta::new(secs as i64, 0).expect("Failed to create TimeDelta");
             info!(
-                "- '{}:{}' has been running for {}days {:02}:{:02}:{:02} (J:H:M:S)",
+                "- '{}:0x{}' has been running for {:?}",
                 task.path.display(),
-                to_hex_prefixed(sha),
-                days,
-                hours,
-                minutes,
-                seconds
+                hex::encode(sha),
+                d.to_std()
             );
         }
     }
