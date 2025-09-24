@@ -1,6 +1,7 @@
 {
     "schedulers": [
         {
+            "scheduler_name": "internal_test_scheduler",
             "scheduler_path": "./scheduler",
             "scheduler_config": "./tests/test_targets/scheduler_config.json"
         }
