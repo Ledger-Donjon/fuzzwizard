@@ -88,7 +88,7 @@ fn main() {
 
 	// Spawn scheduler project via `cargo run` in provided directory
 	// Launch all schedulers in the array, collect their children and start times
-	let mut scheduler_children: Vec<(std::process::Child, Instant, String)> = Vec::new();
+	let mut scheduler_processes: Vec<(String, Instant, std::process::Child)> = Vec::new();
 	for scheduler in schedulers {
 		let scheduler_project_dir = scheduler.get("scheduler_path")
 			.expect("scheduler_path missing in scheduler")
@@ -98,6 +98,10 @@ fn main() {
 			.expect("scheduler_config missing in scheduler")
 			.as_str()
 			.expect("scheduler_config must be a string");
+		let scheduler_name = scheduler.get("scheduler_name")
+			.map(|v| v.as_str().unwrap_or("unnamed_scheduler"))
+			.unwrap_or("unnamed_scheduler")
+			.to_string();
 		info!("Launching scheduler: {} with config {}", scheduler_project_dir, scheduler_config);
 		let child = Command::new("cargo")
 			.env("RUST_LOG", "info")
@@ -109,8 +113,9 @@ fn main() {
 			.stderr(Stdio::inherit())
 			.spawn()
 			.expect("failed to spawn scheduler project");
-		scheduler_children.push((child, Instant::now(), scheduler_project_dir.to_string()));
+		scheduler_processes.push((scheduler_name, Instant::now(), child));
 	}
+
 	std::thread::sleep(Duration::from_secs(2));
 
 
@@ -126,15 +131,57 @@ fn main() {
 				send_slack_alert(&slack_token, &slack_channel, &text, should_send_slack_alert);
 			}
 		}
-		// Vérifie si les child de tous les scheduler_children sont encore en cours
-		for i in (0..scheduler_children.len()).rev() {
-			let (child, started_at, scheduler_name) = &mut scheduler_children[i];
+		// Synchronize scheduler_processes with the config file in case a new scheduler is added at runtime.
+		// Reload config file
+		let config_file = std::fs::read_to_string(&config_path)
+			.expect(&format!("Failed to read config file: {}", config_path.display()));
+		let config_json: serde_json::Value = serde_json::from_str(&config_file)
+			.expect("Failed to parse config.json");
+		let schedulers = config_json.get("schedulers")
+			.expect("schedulers missing in config.json")
+			.as_array()
+			.expect("schedulers must be an array");
+
+		// For each scheduler in config, check if it's already running, if not, launch it
+		for scheduler in schedulers {
+			let scheduler_name = scheduler.get("scheduler_name")
+				.map(|v| v.as_str().unwrap_or("unnamed_scheduler"))
+				.unwrap_or("unnamed_scheduler")
+				.to_string();
+			let already_running = scheduler_processes.iter().any(|(name, _, _)| *name == scheduler_name);
+			if !already_running {
+				let scheduler_project_dir = scheduler.get("scheduler_path")
+					.expect("scheduler_path missing in scheduler")
+					.as_str()
+					.expect("scheduler_path must be a string");
+				let scheduler_config = scheduler.get("scheduler_config")
+					.expect("scheduler_config missing in scheduler")
+					.as_str()
+					.expect("scheduler_config must be a string");
+				info!("Launching new scheduler: {} with config {}", scheduler_project_dir, scheduler_config);
+				let child = Command::new("cargo")
+					.env("RUST_LOG", "info")
+					.current_dir(&scheduler_project_dir)
+					.arg("run")
+					.arg(scheduler_config.to_string())
+					.arg(logdir.to_string())
+					.stdout(Stdio::inherit())
+					.stderr(Stdio::inherit())
+					.spawn()
+					.expect("failed to spawn scheduler project");
+				scheduler_processes.push((scheduler_name, Instant::now(), child));
+			}
+		}
+
+		// Remove scheduler_processes whose child has exited
+		for i in (0..scheduler_processes.len()).rev() {
+			let (scheduler_name, started_at, child) = &mut scheduler_processes[i];
 			if let Some(status) = child.try_wait().unwrap() {
 				let uptime = started_at.elapsed().as_secs();
-				let text = format!("Scheduler {} exited with {:?} after {}s", scheduler_name, status.code(), uptime);
+				let text = format!("Scheduler {} exited with {:?} after {}s.", scheduler_name, status.code(), uptime);
 				info!("{}", text);
 				send_slack_alert(&slack_token, &slack_channel, &text, should_send_slack_alert);
-				scheduler_children.remove(i);
+				scheduler_processes.remove(i);
 			}
 		}
 		
@@ -149,7 +196,7 @@ fn main() {
 			status_lines.push(format!("Process '{}' running for {:02}:{:02}:{:02}", p.name, hours, minutes, seconds));
 		}
 
-		for (_, started_at, scheduler_name) in scheduler_children.iter() {
+		for (scheduler_name, started_at		, _) in scheduler_processes.iter() {
 			let secs = started_at.elapsed().as_secs();
 			let hours = secs / 3600;
 			let minutes = (secs % 3600) / 60;
