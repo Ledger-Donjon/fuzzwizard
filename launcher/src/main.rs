@@ -1,16 +1,31 @@
-use std::path::PathBuf;
+use std::path::{PathBuf};
 use std::process::{Command, Stdio, Child};
 use std::time::{Duration, Instant};
 use chrono::TimeDelta;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE};
 use log::{info, error};
+use serde::{Serialize, Deserialize};
 
 #[derive(Debug)]
 struct ManagedProcess {
 	name: String,
 	child: Child,
 	started_at: Instant,
+}
+#[derive(Serialize, Deserialize)]
+struct Scheduler {
+	name: String, 
+	path: String,
+	config: String,
+}
+#[derive(Serialize, Deserialize)]
+struct Config {
+	schedulers: Vec<Scheduler>, 
+	database_url: String, 
+	logdir: String,
+	container_binary:Option<String>,
+	slack_alert: bool
 }
 
 fn require_env(name: &str) -> String {
@@ -58,31 +73,21 @@ fn main() {
 	};
 	let config_file = std::fs::read_to_string(&config_path)
 		.expect(&format!("Failed to read config file: {}", config_path.display()));
-	let config_json: serde_json::Value = serde_json::from_str(&config_file)
+
+	let config_json: Config = serde_json::from_str(&config_file)
 		.expect("Failed to parse config.json");
-	let should_send_slack_alert = config_json.get("slack_alert")
-		.expect("should_send_slack_alert missing in config.json")
-		.as_bool()
-		.expect("should_send_slack_alert must be a boolean");
-	// Support multiple schedulers: config_json["schedulers"] is an array of objects with scheduler_path and scheduler_config
-	let schedulers = config_json.get("schedulers")
-		.expect("schedulers missing in config.json")
-		.as_array()
-		.expect("schedulers must be an array");
-	if schedulers.is_empty() {
+
+	if config_json.schedulers.is_empty() {
 		panic!("schedulers array in config.json must not be empty");
 	}
-	let logdir = config_json.get("logdir")
-		.expect("logdir missing in config.json")
-		.as_str()
-		.expect("logdir must be a string");
+
 	// Spawn backend
 	let mut procs: Vec<ManagedProcess> = Vec::new();
 	procs.push(spawn_process("backend", "cargo", &["run", "-p", "backend"]));
 	info!("backend launched");
 	std::thread::sleep(Duration::from_secs(3));
 	// Spawn slackwizard
-	if should_send_slack_alert {
+	if config_json.slack_alert {
 		procs.push(spawn_process("slackwizard", "cargo", &["run", "-p", "slackwizard"]));
 		info!("slackwizard launched");
 	}
@@ -90,31 +95,24 @@ fn main() {
 	// Spawn scheduler project via `cargo run` in provided directory
 	// Launch all schedulers in the array, collect their children and start times
 	let mut scheduler_processes: Vec<(String, Instant, std::process::Child)> = Vec::new();
-	for scheduler in schedulers {
-		let scheduler_project_dir = scheduler.get("path")
-			.expect("scheduler_path missing in scheduler")
-			.as_str()
-			.expect("scheduler_path must be a string");
-		let scheduler_config = scheduler.get("config")
-			.expect("scheduler_config missing in scheduler")
-			.as_str()
-			.expect("scheduler_config must be a string");
-		let scheduler_name = scheduler.get("name")
-			.map(|v| v.as_str().unwrap_or("unnamed_scheduler"))
-			.unwrap_or("unnamed_scheduler")
-			.to_string();
-		info!("Launching scheduler: {} with config {}", scheduler_project_dir, scheduler_config);
+	for scheduler in config_json.schedulers {
+		info!("Launching scheduler: {} with config {}", scheduler.path, scheduler.config);
 		let child = Command::new("cargo")
 			.env("RUST_LOG", "info")
-			.current_dir(&scheduler_project_dir)
+			.current_dir(&scheduler.path)
 			.arg("run")
-			.arg(scheduler_config.to_string())
-			.arg(logdir.to_string())
+			.arg(scheduler.config)
+			.arg(config_json.logdir.to_string())
+			.arg(&format!("{}", if let Some(ref container_binary) = config_json.container_binary {
+				container_binary.to_string()
+			} else {
+				"".to_string()
+			}))
 			.stdout(Stdio::inherit())
 			.stderr(Stdio::inherit())
 			.spawn()
 			.expect("failed to spawn scheduler project");
-		scheduler_processes.push((scheduler_name, Instant::now(), child));
+		scheduler_processes.push((scheduler.name, Instant::now(), child));
 	}
 
 	std::thread::sleep(Duration::from_secs(2));
@@ -130,7 +128,7 @@ fn main() {
 				procs.remove(i);
 				let text = format!("Process {} exited with {:?} after {}s", name, status.code(), uptime);
 				info!("{}", text);
-				send_slack_alert(&slack_token, &slack_channel, &text, should_send_slack_alert);
+				send_slack_alert(&slack_token, &slack_channel, &text, config_json.slack_alert);
 			}
 		}
 		// Synchronize scheduler_processes with the config file in case a new scheduler is added at runtime.
@@ -142,35 +140,18 @@ fn main() {
 				continue;
 			}
 		};
-		let config_json: serde_json::Value = match serde_json::from_str(&config_file) {
+		let config_json: Config = match serde_json::from_str(&config_file) {
 			Ok(json) => json,
 			Err(e) => {
 				eprintln!("\x1b[31m[Error] Failed to parse config.json: {}, config is not updated\x1b[0m", e);
 				continue;
 			}
 		};
-		let schedulers = match config_json.get("schedulers") {
-			Some(s) => match s.as_array() {
-				Some(arr) => arr,
-				None => {
-					eprintln!("\x1b[31m[Error] 'schedulers' must be an array in config.json, config is not updated\x1b[0m");
-					continue;
-				}
-			},
-			None => {
-				eprintln!("\x1b[31m[Error] 'schedulers' missing in config.json, config is not updated\x1b[0m");
-				continue;
-			}
-		};
 
 		// If a scheduler is running but no longer present in the config, stop it
-		let scheduler_names_in_config: std::collections::HashSet<String> = schedulers.iter()
-			.map(|s| s.get("name")
-				.map(|v| v.as_str().unwrap_or("unnamed_scheduler").to_string())
-				.unwrap_or("unnamed_scheduler".to_string()))
+		let scheduler_names_in_config: std::collections::HashSet<String> = config_json.schedulers.iter()
+			.map(|s| s.name.clone())
 			.collect();
-
-		// Remove and kill scheduler processes whose name is not in the config anymore
 		for i in (0..scheduler_processes.len()).rev() {
 			let (scheduler_name, _started_at, child) = &mut scheduler_processes[i];
 			if !scheduler_names_in_config.contains(scheduler_name) {
@@ -186,33 +167,26 @@ fn main() {
 		}
 
 		// For each scheduler in config, check if it's already running, if not, launch it
-		for scheduler in schedulers {
-			let scheduler_name = scheduler.get("name")
-				.map(|v| v.as_str().unwrap_or("unnamed_scheduler"))
-				.unwrap_or("unnamed_scheduler")
-				.to_string();
-			let already_running = scheduler_processes.iter().any(|(name, _, _)| *name == scheduler_name);
+		for scheduler in config_json.schedulers {
+			let already_running = scheduler_processes.iter().any(|(name, _, _)| *name == scheduler.name);
 			if !already_running {
-				let scheduler_project_dir = scheduler.get("path")
-					.expect("scheduler_path missing in scheduler")
-					.as_str()
-					.expect("scheduler_path must be a string");
-				let scheduler_config = scheduler.get("config")
-					.expect("scheduler_config missing in scheduler")
-					.as_str()
-					.expect("scheduler_config must be a string");
-				info!("Launching new scheduler: {} with config {}", scheduler_project_dir, scheduler_config);
+				info!("Launching new scheduler: {} with config {}", scheduler.path, scheduler.config);
 				let child = Command::new("cargo")
 					.env("RUST_LOG", "info")
-					.current_dir(&scheduler_project_dir)
+					.current_dir(&scheduler.path)
 					.arg("run")
-					.arg(scheduler_config.to_string())
-					.arg(logdir.to_string())
+					.arg(scheduler.config.to_string())
+					.arg(config_json.logdir.to_string())
+					.arg(format!("{}", if let Some(ref container_binary) = config_json.container_binary {
+						container_binary.to_string()
+					} else {
+						"".to_string()
+					}))
 					.stdout(Stdio::inherit())
 					.stderr(Stdio::inherit())
 					.spawn()
 					.expect("failed to spawn scheduler project");
-				scheduler_processes.push((scheduler_name, Instant::now(), child));
+				scheduler_processes.push((scheduler.name, Instant::now(), child));
 			}
 		}
 
@@ -224,7 +198,7 @@ fn main() {
 				let d = TimeDelta::new(uptime as i64, 0).expect("Failed to create TimeDelta");
 				let text = format!("Scheduler {} exited with {:?} after {:?}.", scheduler_name, status.code(), d.to_std());
 				info!("{}", text);
-				send_slack_alert(&slack_token, &slack_channel, &text, should_send_slack_alert);
+				send_slack_alert(&slack_token, &slack_channel, &text, config_json.slack_alert);
 				scheduler_processes.remove(i);
 			}
 		}

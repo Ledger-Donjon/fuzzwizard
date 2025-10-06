@@ -1,5 +1,5 @@
 use log::{debug, info};
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use std::time::Instant;
 use std::{
     collections::{HashMap, HashSet},
@@ -13,6 +13,7 @@ use rand::Rng;
 use std::io::Write;
 use chrono::{prelude::*, TimeDelta};
 use hex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Errors that can occur within the scheduler crate
 #[derive(Debug, Error)]
@@ -29,6 +30,20 @@ pub enum SchedulerError {
     /// Failed HTTP request to backend
     #[error("Backend error: {0}")]
     Backend(#[from] reqwest::Error),
+    #[error("Container binary path not specified")]
+    MissingContainerBinary,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+
+pub struct SchedulerConfig {
+    pub scheduler_name: String,
+    pub targets_directory: Vec<String>,
+    pub build_script: String,
+    pub backend_url: String,
+    pub corpus_directory: String, 
+    pub crashes_directory: String, 
+    pub container_image: Option<String>,
 }
 
 /// Convenient result alias for the scheduler crate
@@ -60,19 +75,51 @@ pub struct Scheduler<C: TargetsCollector> {
     backend_url: String,
     /// Name of the scheduler
     scheduler_name: String,
+    container_image:Option<String>,
+    container_binary:Option<PathBuf>
+}
+
+#[derive(Clone, Debug)]
+struct ProcessRecord {
+    pid: u32,
+    container_name: Option<String>,
+}
+
+static PROCESS_REGISTRY: OnceLock<Arc<Mutex<Vec<ProcessRecord>>>> = OnceLock::new();
+
+fn install_ctrlc_handler() {
+    let registry = PROCESS_REGISTRY
+        .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
+        .clone();
+    let _ = ctrlc::set_handler(move || {
+        if let Ok(records) = registry.lock() {
+            for rec in records.iter() {
+                if let Some(name) = &rec.container_name {
+                    let _ = Command::new("docker").args(["rm", "-f", name]).status();
+                }
+                let _ = Command::new("kill").args(["-TERM", &rec.pid.to_string()]).status();
+            }
+        }
+        std::process::exit(130);
+    });
 }
 
 impl<C: TargetsCollector> Scheduler<C> {
     /// Create a new [`Scheduler`].
-    pub fn new(collector: C, corpus_directory: PathBuf, crashes_directory: PathBuf, backend_url: String, scheduler_name: String) -> Self {
+    pub fn new(collector: C, config:SchedulerConfig, container_binary:Option<PathBuf>) -> Self {
+        // Ensure Ctrl-C handler is installed once
+        install_ctrlc_handler();
         Self {
             collector,
             targets: HashMap::new(),
             tasks: HashMap::new(),
-            corpus_directory,
-            crashes_directory,
-            backend_url,
-            scheduler_name,
+            corpus_directory:config.corpus_directory.into(),
+            crashes_directory:config.crashes_directory.into(),
+            backend_url:config.backend_url,
+            scheduler_name:config.scheduler_name,
+            container_image:config.container_image,
+            container_binary,
+
         }
     }
 
@@ -91,6 +138,7 @@ impl<C: TargetsCollector> Scheduler<C> {
         let targets_to_check = latest_targets_sha.intersection(&old_targets_sha);
 
         for &target in targets_to_stop {
+            info!("stopping task: {:?}", target);
             if let Some(mut task) = self.tasks.remove(target) {
                 task.child.kill()?;
             } else {
@@ -168,20 +216,69 @@ impl<C: TargetsCollector> Scheduler<C> {
         if !fuzzer_crashdir.exists() {
             fs::create_dir_all(&fuzzer_crashdir)?;
         }
+        let mut child:Child;
 
+        if let Some(ref container_image)=self.container_image{
 
-        let mut child = Command::new(&fuzzer_path)
-            .args(&[
+            if let Some(ref binary)=self.container_binary {
+                let mut rng = rand::rng();
+                let mut random_name: [u8; 8] = [0u8; 8];
+                rng.fill(&mut random_name);
+                let name = format!("docker-fw-{}-{}", hex::encode(random_name), fuzzer_name);
+                child= Command::new(binary)
+                    .args(&[
+                        "run",
+                        "--rm",
+                        "--platform=linux/amd64",
+                        "--name",
+                        &name,
+                        "-v",
+                        &format!("{}:/fuzzer/binary", fuzzer_path.display().to_string()), 
+                        "-v",
+                        &format!("{}:/fuzzer/crash_dir/", fuzzer_crashdir.display().to_string()), 
+                        "-v",
+                        &format!("{}:/fuzzer/corpus_dir/", fuzzer_corpus.display().to_string()), 
+                        container_image,
+                        "/fuzzer/binary",
+                        //&format!("{}", "ENV"),
+                        "/fuzzer/corpus_dir/",
+                        "-artifact_prefix=/fuzzer/crash_dir/"
+                    ])
+                    .stderr(Stdio::piped())
+                    .spawn()?;
+                if let Some(reg) = PROCESS_REGISTRY.get() {
+                    if let Ok(mut v) = reg.lock() {
+                        v.push(ProcessRecord { pid: child.id(), container_name: Some(name) });
+                    }
+                }
+            }
+            else {
+                return Err(SchedulerError::MissingContainerBinary);
+            }
+        }
+        else {
+            child = Command::new(&fuzzer_path)
+                .args(&[
                 &fuzzer_corpus.display().to_string(),
-                &format!("-artifact_prefix={}{}", fuzzer_crashdir.display().to_string(), "/")
+                &format!(
+                    "-artifact_prefix={}{}",
+                    fuzzer_crashdir.display().to_string(),
+                    "/"
+                ),
             ])
             .stderr(Stdio::piped())
             .spawn()?;
+            if let Some(reg) = PROCESS_REGISTRY.get() {
+                if let Ok(mut v) = reg.lock() {
+                    v.push(ProcessRecord { pid: child.id(), container_name: None });
+                }
+            }
 
+                
+        }
         let Some(child_stderr) = child.stderr.take() else {
             return Err(SchedulerError::MissingChildStderr);
         };
-
         Ok(Task {
             child,
             stderr: child_stderr,
@@ -199,7 +296,13 @@ impl<C: TargetsCollector> Scheduler<C> {
                 Ok(Some(_)) => {
                     let mut stderr = String::new();
                     task.stderr.read_to_string(&mut stderr)?;
-                    //info!("crash stderr: {:?}", stderr);
+                    info!(
+                        "crash task: {:?}, {:?}, {:?}, {:?}",
+                        task,
+                        task.child.id(),
+                        task.child.stdout,
+                        task.child.stderr
+                    );
 
                     // Get crashing corpus instance
                     let crash = stderr

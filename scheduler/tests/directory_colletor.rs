@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fs, os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
 
 use assert_fs::prelude::{FileWriteStr, PathChild};
-use scheduler::{Scheduler, Sha, TargetsCollector};
+use scheduler::{Scheduler, Sha, TargetsCollector, SchedulerConfig};
 use sha3::{Digest, Sha3_256};
 
 struct DirectoryCollector {
@@ -33,10 +33,17 @@ fn directory_collector() {
         targets_dir: temp_dir.to_path_buf(),
     };
 
-    let corpus_dir = std::env::temp_dir();
-    let crashes_dir = std::env::temp_dir().join("crashes");
-    let backend_url = "http://127.0.0.1:0".to_string();
-    let mut scheduler = Scheduler::new(collector, corpus_dir, crashes_dir, backend_url, "test_scheduler".to_string());
+    let config = SchedulerConfig {
+        targets_directory:vec![temp_dir.to_path_buf().to_string_lossy().into()],
+        build_script: "".to_string(),
+        scheduler_name: "test_scheduler".to_string(),
+        corpus_directory: std::env::temp_dir().to_string_lossy().into(),
+        crashes_directory: std::env::temp_dir().join("crashes").to_string_lossy().into(),
+        container_image: None,
+        backend_url: "http://127.0.0.1:0".to_string(),
+    };
+
+    let mut scheduler = Scheduler::new(collector, config, None);
 
     let a_sh = temp_dir.child("a.sh");
     a_sh.write_str(

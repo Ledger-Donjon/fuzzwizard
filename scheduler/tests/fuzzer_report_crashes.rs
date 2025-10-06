@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fs, path::PathBuf, time::Duration};
 
-use scheduler::{Scheduler, Sha, TargetsCollector};
+use scheduler::{Scheduler, Sha, TargetsCollector, SchedulerConfig};
 use sha3::{Digest, Sha3_256};
 
 struct DirectoryCollector {
@@ -30,10 +30,17 @@ fn fuzzer_report_crashes() {
         targets_dir: "./tests/test_targets/test_fuzzers/build".into(),
     };
 
-    let corpus_dir = std::env::temp_dir();
-    let crashes_dir = std::env::temp_dir().join("crashes");
-    let backend_url = "http://127.0.0.1:0".to_string();
-    let mut scheduler = Scheduler::new(collector, corpus_dir, crashes_dir, backend_url, "test_scheduler".to_string());
+    let config = SchedulerConfig {
+        scheduler_name: "test_scheduler".to_string(),
+        targets_directory: vec!["./tests/test_targets/test_fuzzers/build".into()],
+        build_script: "".to_string(),
+        backend_url: "http://127.0.0.1:0".to_string(),
+        corpus_directory: std::env::temp_dir().to_string_lossy().into(),
+        crashes_directory: std::env::temp_dir().join("crashes").to_string_lossy().into(),
+        container_image: None,
+    };
+
+    let mut scheduler = Scheduler::new(collector, config, None);
 
     let _ = scheduler.update("./logs");
 

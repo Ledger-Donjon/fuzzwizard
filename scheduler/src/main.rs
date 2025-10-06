@@ -8,37 +8,34 @@ use log::info;
 use std::env;
 
 struct DirectoryTargetsCollector {
-    targets_directory: PathBuf,
+    targets_directories: Vec<PathBuf>,
 }
 
 impl TargetsCollector for DirectoryTargetsCollector {
     fn collect_targets(&self) -> HashMap<Sha, PathBuf> {
         let mut targets = HashMap::new();
-        for direntry in fs::read_dir(self.targets_directory.clone()).unwrap() {
-            let direntry = direntry.unwrap();
-            let target_path = direntry.path();
-            if !target_path.is_file() {
-                continue;
-            }
-            if target_path.metadata().unwrap().permissions().mode() & 0o111 == 0 {
-                continue;
-            }
+        for directory in self.targets_directories.iter().cloned() {
 
-            let target_hash = Sha3_256::digest(fs::read(&target_path).unwrap());
-            targets.insert(target_hash.into(), target_path);
+            for direntry in fs::read_dir(directory).unwrap() {
+                let direntry = direntry.unwrap();
+                let target_path = direntry.path();
+                if !target_path.is_file() {
+                    continue;
+                }
+                if target_path.metadata().unwrap().permissions().mode() & 0o111 == 0 {
+                    continue;
+                }
+
+                let target_hash = Sha3_256::digest(fs::read(&target_path).unwrap());
+                targets.insert(target_hash.into(), target_path);
+            }
         }
         targets
     }
 }
-fn build_targets(config_json: serde_json::Value) {
+fn build_targets(config_json: scheduler::SchedulerConfig) {
      // Static to keep track of last build time
      static mut LAST_BUILD: Option<Instant> = None;
-
-     // Get build_script from config
-     let build_script = config_json.get("build_script")
-         .expect("Missing 'build_script' in config")
-         .as_str()
-         .expect("'build_script' should be a string");
 
      // Run build_script every minute
      let now = Instant::now();
@@ -51,7 +48,7 @@ fn build_targets(config_json: serde_json::Value) {
      if should_run {
          let status = Command::new("sh")
              .arg("-c")
-             .arg(build_script)
+             .arg(config_json.build_script)
              .status();
          match status {
              Ok(s) if s.success() => {
@@ -99,36 +96,24 @@ fn main() {
         std::process::exit(1);
     }
 
-    let config_json: serde_json::Value = serde_json::from_str(&config_contents)
+    let container_binary = env::args().nth(3);
+
+    let config_json: scheduler::SchedulerConfig = serde_json::from_str(&config_contents)
         .expect("Failed to parse config file as JSON");
-    let scheduler_name = config_json.get("scheduler_name")
-        .expect("Missing 'scheduler_name' in config")
-        .as_str()
-        .expect("'scheduler_name' should be a string");
-    let targets_directory = config_json.get("targets_directory")
-        .expect("Missing 'targets_directory' in config")
-        .as_str()
-        .expect("'targets_directory' should be a string");
-    let targets_directory = PathBuf::from(targets_directory);
 
     let collector = DirectoryTargetsCollector {
-        targets_directory,
+        targets_directories: config_json
+        .targets_directory
+        .iter()
+        .map(|p| PathBuf::from(p))
+        .collect(),
     };
-
-    let backend_url = config_json.get("backend_url")
-        .expect("Missing 'backend_url' in config")
-        .as_str()
-        .expect("'backend_url' should be a string");
-    let corpus_directory = config_json.get("corpus_directory")
-        .expect("Missing 'corpus_directory' in config")
-        .as_str()
-        .expect("'corpus_directory' should be a string");
-    let crashes_directory = config_json.get("crashes_directory")
-        .expect("Missing 'crashes_directory' in config")
-        .as_str()
-        .expect("'crashes_directory' should be a string");
-    build_targets(config_json.clone()); 
-    let mut scheduler = Scheduler::new(collector, corpus_directory.into(), crashes_directory.into(), backend_url.to_string(), scheduler_name.to_string());
+    build_targets(config_json.clone());
+    let mut scheduler = Scheduler::new(
+        collector,
+        config_json.clone(),
+        container_binary.map(PathBuf::from)
+    );
 
     loop {
         build_targets(config_json.clone());
