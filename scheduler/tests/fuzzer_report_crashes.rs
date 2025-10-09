@@ -38,6 +38,7 @@ fn fuzzer_report_crashes() {
         corpus_directory: std::env::temp_dir().to_string_lossy().into(),
         crashes_directory: std::env::temp_dir().join("crashes").to_string_lossy().into(),
         container_image: None,
+        container_options: None,
     };
 
     let mut scheduler = Scheduler::new(collector, config, None);

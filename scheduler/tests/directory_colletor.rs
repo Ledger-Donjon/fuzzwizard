@@ -40,6 +40,7 @@ fn directory_collector() {
         corpus_directory: std::env::temp_dir().to_string_lossy().into(),
         crashes_directory: std::env::temp_dir().join("crashes").to_string_lossy().into(),
         container_image: None,
+        container_options: None,
         backend_url: "http://127.0.0.1:0".to_string(),
     };
 

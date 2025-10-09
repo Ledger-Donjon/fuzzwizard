@@ -44,6 +44,7 @@ pub struct SchedulerConfig {
     pub corpus_directory: String, 
     pub crashes_directory: String, 
     pub container_image: Option<String>,
+    pub container_options: Option<Vec<String>>,
 }
 
 /// Convenient result alias for the scheduler crate
@@ -76,7 +77,8 @@ pub struct Scheduler<C: TargetsCollector> {
     /// Name of the scheduler
     scheduler_name: String,
     container_image:Option<String>,
-    container_binary:Option<PathBuf>
+    container_binary:Option<PathBuf>,
+    container_options:Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -118,6 +120,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             backend_url:config.backend_url,
             scheduler_name:config.scheduler_name,
             container_image:config.container_image,
+            container_options:config.container_options,
             container_binary,
 
         }
@@ -225,25 +228,28 @@ impl<C: TargetsCollector> Scheduler<C> {
                 let mut random_name: [u8; 8] = [0u8; 8];
                 rng.fill(&mut random_name);
                 let name = format!("docker-fw-{}-{}", hex::encode(random_name), fuzzer_name);
-                child= Command::new(binary)
-                    .args(&[
-                        "run",
-                        "--rm",
-                        "--platform=linux/amd64",
-                        "--name",
-                        &name,
-                        "-v",
-                        &format!("{}:/fuzzer/binary", fuzzer_path.display().to_string()), 
-                        "-v",
-                        &format!("{}:/fuzzer/crash_dir/", fuzzer_crashdir.display().to_string()), 
-                        "-v",
-                        &format!("{}:/fuzzer/corpus_dir/", fuzzer_corpus.display().to_string()), 
-                        container_image,
-                        "/fuzzer/binary",
-                        //&format!("{}", "ENV"),
-                        "/fuzzer/corpus_dir/",
-                        "-artifact_prefix=/fuzzer/crash_dir/"
-                    ])
+                let mut args: Vec<String> = vec![
+                    "run".into(),
+                    "--rm".into(),
+                    "--name".into(),
+                    name.clone(),
+                    "-v".into(), format!("{}:/fuzzer/binary", fuzzer_path.display()),
+                    "-v".into(), format!("{}:/fuzzer/crash_dir/", fuzzer_crashdir.display()),
+                    "-v".into(), format!("{}:/fuzzer/corpus_dir/", fuzzer_corpus.display()),
+                ];
+
+                // Then image and command
+                args.push(container_image.clone());
+                if let Some(ref opts) = self.container_options {
+                    args.extend(opts.iter().cloned());
+                }
+
+                args.push("/fuzzer/binary".into());
+                args.push("/fuzzer/corpus_dir/".into());
+                args.push("-artifact_prefix=/fuzzer/crash_dir/".into());
+
+                child = Command::new(binary)
+                    .args(args.iter().map(|s| s.as_str()))
                     .stderr(Stdio::piped())
                     .spawn()?;
                 if let Some(reg) = PROCESS_REGISTRY.get() {
