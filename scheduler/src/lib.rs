@@ -330,8 +330,11 @@ impl<C: TargetsCollector> Scheduler<C> {
                     // We want to rewrite that path to use self.crashes_directory instead.
                     let mut crash_corpus = crash_corpus.to_string();
                     if crash_corpus.starts_with("/fuzzer/crash_dir/") {
+                        let fuzzer_name = task.path.file_name().and_then(|s| s.to_str()).ok_or(
+                            SchedulerError::InconsistentState("invalid fuzzer path name"),
+                        )?;
                         let filename = &crash_corpus["/fuzzer/crash_dir/".len()..];
-                        crash_corpus = self.crashes_directory.join(filename).to_string_lossy().to_string();
+                        crash_corpus = self.crashes_directory.join(fuzzer_name).join(filename).to_string_lossy().to_string();
                     }
                     info!("crash_corpus: {:?}", crash_corpus);
                     let crashing_instance =
