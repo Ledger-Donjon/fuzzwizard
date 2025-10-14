@@ -14,6 +14,7 @@ use std::{
     path::Path,
     sync::{Arc, Mutex},
 };
+use log::info;
 
 mod schema;
 
@@ -107,9 +108,13 @@ async fn upload_crash(
 
     match diesel::insert_into(crashes::table)
         .values(report)
-        .execute(&mut *db_connection)
+        .returning(crashes::id)
+        .get_results::<i32>(&mut *db_connection)
     {
-        Ok(_) => StatusCode::CREATED,
+        Ok(ids) => {
+            info!("Crash uploaded with ids: {:?}", ids);
+            StatusCode::CREATED
+        },
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

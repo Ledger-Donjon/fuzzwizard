@@ -14,6 +14,7 @@ use std::io::Write;
 use chrono::{prelude::*, TimeDelta};
 use hex;
 use std::sync::{Arc, Mutex, OnceLock};
+use humantime::format_duration;
 
 /// Errors that can occur within the scheduler crate
 #[derive(Debug, Error)]
@@ -241,7 +242,13 @@ impl<C: TargetsCollector> Scheduler<C> {
                 // Then image and command
                 args.push(container_image.clone());
                 if let Some(ref opts) = self.container_options {
-                    args.extend(opts.iter().cloned());
+                    if opts.len() > 0 {
+                        for opt in opts {
+                            if opt != "" {
+                                args.push(opt.clone());
+                            }
+                        }
+                    }
                 }
 
                 args.push("/fuzzer/binary".into());
@@ -318,6 +325,15 @@ impl<C: TargetsCollector> Scheduler<C> {
                         .unwrap_or("Crash detected but no element in stderr");
                     let pattern = "Test unit written to ";
                     let crash_corpus = &crash[crash.find(pattern).unwrap_or(0) + pattern.len()..];
+
+                    // If the task was run in a docker container, crash_corpus will be like /fuzzer/crash_dir/...
+                    // We want to rewrite that path to use self.crashes_directory instead.
+                    let mut crash_corpus = crash_corpus.to_string();
+                    if crash_corpus.starts_with("/fuzzer/crash_dir/") {
+                        let filename = &crash_corpus["/fuzzer/crash_dir/".len()..];
+                        crash_corpus = self.crashes_directory.join(filename).to_string_lossy().to_string();
+                    }
+                    info!("crash_corpus: {:?}", crash_corpus);
                     let crashing_instance =
                         fs::read(crash_corpus).unwrap_or_else(|_| b"NO CRASH INFO".to_vec());
 
@@ -366,7 +382,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                 "- '{}:0x{}' has been running for {:?}",
                 task.path.display(),
                 hex::encode(sha),
-                d.to_std()
+                format_duration(d.to_std().unwrap()).to_string()
             );
         }
     }

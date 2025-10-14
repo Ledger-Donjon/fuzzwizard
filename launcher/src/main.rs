@@ -6,6 +6,7 @@ use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE};
 use log::{info, error};
 use serde::{Serialize, Deserialize};
+use humantime::format_duration;
 
 #[derive(Debug)]
 struct ManagedProcess {
@@ -208,14 +209,14 @@ fn main() {
 
 		for p in procs.iter() {
 			let secs = p.started_at.elapsed().as_secs();
-			let d = TimeDelta::new(secs as i64, 0).expect("Failed to create TimeDelta").to_std();
-			status_lines.push(format!("Process '{}' running for {:?}", p.name, d));
+			let d = TimeDelta::new(secs as i64, 0).expect("Failed to create TimeDelta").to_std().unwrap();
+			status_lines.push(format!("Process '{}' running for {:?}", p.name, format_duration(d).to_string()));
 		}
 
 		for (scheduler_name, started_at		, _) in scheduler_processes.iter() {
 			let secs = started_at.elapsed().as_secs();
-			let d = TimeDelta::new(secs as i64, 0).expect("Failed to create TimeDelta").to_std();
-			status_lines.push(format!("Scheduler '{}' running for {:?}", scheduler_name, d));
+			let d = TimeDelta::new(secs as i64, 0).expect("Failed to create TimeDelta").to_std().unwrap();
+			status_lines.push(format!("Scheduler '{}' running for {:?}", scheduler_name, format_duration(d).to_string()));
 		}
 
 		if !status_lines.is_empty() {
