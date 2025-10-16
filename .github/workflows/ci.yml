@@ -1,0 +1,32 @@
+name: CI
+
+permissions:
+  contents: read
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  muscat:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Setup Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        components: "clippy, rustfmt"
+
+    - name: Build
+      run: cargo build --verbose
+
+    # TODO
+    # - name: Run tests
+    #   run: cargo test --verbose
+
+    - name: Check formatting
+      run: cargo fmt --check
+
+    - name: Lint with Clippy
+      run: cargo clippy -- -Dwarnings
