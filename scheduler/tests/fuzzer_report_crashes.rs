@@ -37,6 +37,7 @@ fn fuzzer_report_crashes() {
         backend_url: "http://127.0.0.1:0".to_string(),
         corpus_directory: std::env::temp_dir().to_string_lossy().into(),
         crashes_directory: std::env::temp_dir().join("crashes").to_string_lossy().into(),
+        coverage_directory: std::env::temp_dir().join("coverage").to_string_lossy().into(),
         container_image: None,
         container_options: None,
     };

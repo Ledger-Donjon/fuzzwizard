@@ -44,6 +44,7 @@ pub struct SchedulerConfig {
     pub backend_url: String,
     pub corpus_directory: String, 
     pub crashes_directory: String, 
+    pub coverage_directory: String,
     pub container_image: Option<String>,
     pub container_options: Option<Vec<String>>,
 }
@@ -73,6 +74,8 @@ pub struct Scheduler<C: TargetsCollector> {
     corpus_directory: PathBuf,
     /// Directory where fuzzer crashes are stored
     crashes_directory: PathBuf,
+    /// Directory where fuzzer coverage are stored
+    coverage_directory: PathBuf,
     /// URL of the backend to report crashes
     backend_url: String,
     /// Name of the scheduler
@@ -86,6 +89,7 @@ pub struct Scheduler<C: TargetsCollector> {
 struct ProcessRecord {
     pid: u32,
     container_name: Option<String>,
+    fuzzer_name: String,
 }
 
 static PROCESS_REGISTRY: OnceLock<Arc<Mutex<Vec<ProcessRecord>>>> = OnceLock::new();
@@ -123,7 +127,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             container_image:config.container_image,
             container_options:config.container_options,
             container_binary,
-
+            coverage_directory:config.coverage_directory.into(),
         }
     }
 
@@ -220,6 +224,10 @@ impl<C: TargetsCollector> Scheduler<C> {
         if !fuzzer_crashdir.exists() {
             fs::create_dir_all(&fuzzer_crashdir)?;
         }
+        let fuzzer_coveragedir = self.coverage_directory.join(fuzzer_name);
+        if !fuzzer_coveragedir.exists() {
+            fs::create_dir_all(&fuzzer_coveragedir)?;
+        }
         let mut child:Child;
 
         if let Some(ref container_image)=self.container_image{
@@ -234,9 +242,12 @@ impl<C: TargetsCollector> Scheduler<C> {
                     "--rm".into(),
                     "--name".into(),
                     name.clone(),
+                    // Set up environment variable for coverage outputs in the container
+                    "-e".into(), "LLVM_PROFILE_FILE=/fuzzer/coverage/%p.profraw".into(),
                     "-v".into(), format!("{}:/fuzzer/binary", fuzzer_path.display()),
                     "-v".into(), format!("{}:/fuzzer/crash_dir/", fuzzer_crashdir.display()),
                     "-v".into(), format!("{}:/fuzzer/corpus_dir/", fuzzer_corpus.display()),
+                    "-v".into(), format!("{}:/fuzzer/coverage/", fuzzer_coveragedir.display()),
                 ];
 
                 // Then image and command
@@ -261,7 +272,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                     .spawn()?;
                 if let Some(reg) = PROCESS_REGISTRY.get() {
                     if let Ok(mut v) = reg.lock() {
-                        v.push(ProcessRecord { pid: child.id(), container_name: Some(name) });
+                        v.push(ProcessRecord { pid: child.id(), container_name: Some(name), fuzzer_name: fuzzer_name.to_string() });
                     }
                 }
             }
@@ -272,18 +283,23 @@ impl<C: TargetsCollector> Scheduler<C> {
         else {
             child = Command::new(&fuzzer_path)
                 .args(&[
-                &fuzzer_corpus.display().to_string(),
-                &format!(
-                    "-artifact_prefix={}{}",
-                    fuzzer_crashdir.display().to_string(),
-                    "/"
-                ),
-            ])
+                    &fuzzer_corpus.display().to_string(),
+                    &format!(
+                        "-artifact_prefix={}{}",
+                        fuzzer_crashdir.display().to_string(),
+                        "/"
+                    ),
+                    // coverage file output option
+                    &format!(
+                        "-LLVM_PROFILE_FILE={}/%p.profraw",
+                        fuzzer_coveragedir.display().to_string() // Or wherever you want to store profraws; adjust as needed
+                    ),
+                ])
             .stderr(Stdio::piped())
             .spawn()?;
             if let Some(reg) = PROCESS_REGISTRY.get() {
                 if let Ok(mut v) = reg.lock() {
-                    v.push(ProcessRecord { pid: child.id(), container_name: None });
+                    v.push(ProcessRecord { pid: child.id(), container_name: None, fuzzer_name: fuzzer_name.to_string() });
                 }
             }
 
@@ -387,6 +403,22 @@ impl<C: TargetsCollector> Scheduler<C> {
                 hex::encode(sha),
                 format_duration(d.to_std().unwrap()).to_string()
             );
+        }
+    }
+
+    pub fn collect_coverage(&self) {
+        if let Some(registry) = PROCESS_REGISTRY.get() {
+            if let Ok(records) = registry.lock() {
+                for rec in records.iter() {
+                    info!("collecting coverage for: {:?}", rec);
+                    if let Some(name) = &rec.container_name {
+                        let _ = Command::new("docker").args(["exec", name, "pkill", "-SIGUSR1", &rec.fuzzer_name]).status();
+                    }
+                    else {
+                        let _ = Command::new("pkill").args(["-SIGUSR1", &rec.fuzzer_name]).status();
+                    }
+                }
+            }
         }
     }
 }

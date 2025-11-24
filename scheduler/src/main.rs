@@ -121,5 +121,6 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_secs(60));
         scheduler.report_crashes().unwrap();
         scheduler.log_running_tasks();
+        scheduler.collect_coverage();
     }
 }

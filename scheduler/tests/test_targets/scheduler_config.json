@@ -4,5 +4,6 @@
   "build_script": "./tests/test_targets/build_and_collect.sh",
   "backend_url": "http://127.0.0.1:3000",
   "corpus_directory": "/tmp/corpus",
-  "crashes_directory": "/tmp/crashes"
+  "crashes_directory": "/tmp/crashes",
+  "coverage_directory": "/tmp/coverage"
 }
