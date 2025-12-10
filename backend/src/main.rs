@@ -7,6 +7,9 @@ use axum::{
 };
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
+use ftail::Ftail;
+use log::LevelFilter;
+use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -14,14 +17,23 @@ use std::{
     path::Path,
     sync::{Arc, Mutex},
 };
-use log::info;
 
 mod schema;
 
 #[tokio::main]
 async fn main() {
-    // initialize tracing
-    tracing_subscriber::fmt::init();
+    // Configure ftail to write to a file
+    let log_file_path = "./logs/backend.log";
+    // Ensure logs directory exists
+    if let Err(e) = std::fs::create_dir_all("./logs") {
+        error!("Failed to create log directory './logs': {}", e);
+        std::process::exit(1);
+    }
+
+    Ftail::new()
+        .single_file(std::path::Path::new(log_file_path), true, LevelFilter::Info)
+        .init()
+        .expect("Failed to initialize logger");
 
     let db_url = env::var("DATABASE_URL").expect("DATABASE URL must be set");
     let db_connection = Arc::new(Mutex::new(PgConnection::establish(&db_url).unwrap()));
@@ -114,7 +126,7 @@ async fn upload_crash(
         Ok(ids) => {
             info!("Crash uploaded with ids: {:?}", ids);
             StatusCode::CREATED
-        },
+        }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

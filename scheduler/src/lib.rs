@@ -1,5 +1,11 @@
+use chrono::{TimeDelta, prelude::*};
+use hex;
+use humantime::format_duration;
 use log::{debug, info};
-use serde::{Serialize, Deserialize};
+use rand::Rng;
+use serde::{Deserialize, Serialize};
+use std::io::Write;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use std::{
     collections::{HashMap, HashSet},
@@ -9,12 +15,6 @@ use std::{
     process::{Child, ChildStderr, Command, Stdio},
 };
 use thiserror::Error;
-use rand::Rng;
-use std::io::Write;
-use chrono::{prelude::*, TimeDelta};
-use hex;
-use std::sync::{Arc, Mutex, OnceLock};
-use humantime::format_duration;
 
 /// Errors that can occur within the scheduler crate
 #[derive(Debug, Error)]
@@ -42,8 +42,8 @@ pub struct SchedulerConfig {
     pub targets_directory: Vec<String>,
     pub build_script: String,
     pub backend_url: String,
-    pub corpus_directory: String, 
-    pub crashes_directory: String, 
+    pub corpus_directory: String,
+    pub crashes_directory: String,
     pub coverage_directory: String,
     pub container_image: Option<String>,
     pub container_options: Option<Vec<String>>,
@@ -80,9 +80,18 @@ pub struct Scheduler<C: TargetsCollector> {
     backend_url: String,
     /// Name of the scheduler
     scheduler_name: String,
-    container_image:Option<String>,
-    container_binary:Option<PathBuf>,
-    container_options:Option<Vec<String>>,
+    container_image: Option<String>,
+    container_binary: Option<PathBuf>,
+    container_options: Option<Vec<String>>,
+}
+
+#[derive(Serialize, Clone)]
+struct CrashReport {
+    report: Vec<u8>,
+    input: Vec<u8>,
+    filename: String,
+    program: Vec<u8>,
+    scheduler_name: String,
 }
 
 #[derive(Clone, Debug)]
@@ -90,6 +99,28 @@ struct ProcessRecord {
     pid: u32,
     container_name: Option<String>,
     fuzzer_name: String,
+}
+
+/// Status of a task
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskStatus {
+    Running,
+    Crashed,
+    Stopped,
+}
+
+/// A fuzzing task to be scheduled by the [`Scheduler`]
+#[derive(Debug)]
+pub struct Task {
+    /// Path of the fuzzer binary
+    path: PathBuf,
+    /// The fuzzer process
+    child: Child,
+    /// The stderr of the fuzzer process
+    stderr: ChildStderr,
+    started_at: Instant,
+    /// Status of the task (running, crashed, or stopped)
+    pub status: TaskStatus,
 }
 
 static PROCESS_REGISTRY: OnceLock<Arc<Mutex<Vec<ProcessRecord>>>> = OnceLock::new();
@@ -104,7 +135,9 @@ fn install_ctrlc_handler() {
                 if let Some(name) = &rec.container_name {
                     let _ = Command::new("docker").args(["rm", "-f", name]).status();
                 }
-                let _ = Command::new("kill").args(["-TERM", &rec.pid.to_string()]).status();
+                let _ = Command::new("kill")
+                    .args(["-TERM", &rec.pid.to_string()])
+                    .status();
             }
         }
         std::process::exit(130);
@@ -113,21 +146,21 @@ fn install_ctrlc_handler() {
 
 impl<C: TargetsCollector> Scheduler<C> {
     /// Create a new [`Scheduler`].
-    pub fn new(collector: C, config:SchedulerConfig, container_binary:Option<PathBuf>) -> Self {
+    pub fn new(collector: C, config: SchedulerConfig, container_binary: Option<PathBuf>) -> Self {
         // Ensure Ctrl-C handler is installed once
         install_ctrlc_handler();
         Self {
             collector,
             targets: HashMap::new(),
             tasks: HashMap::new(),
-            corpus_directory:config.corpus_directory.into(),
-            crashes_directory:config.crashes_directory.into(),
-            backend_url:config.backend_url,
-            scheduler_name:config.scheduler_name,
-            container_image:config.container_image,
-            container_options:config.container_options,
+            corpus_directory: config.corpus_directory.into(),
+            crashes_directory: config.crashes_directory.into(),
+            backend_url: config.backend_url,
+            scheduler_name: config.scheduler_name,
+            container_image: config.container_image,
+            container_options: config.container_options,
             container_binary,
-            coverage_directory:config.coverage_directory.into(),
+            coverage_directory: config.coverage_directory.into(),
         }
     }
 
@@ -147,8 +180,9 @@ impl<C: TargetsCollector> Scheduler<C> {
 
         for &target in targets_to_stop {
             info!("stopping task: {:?}", target);
-            if let Some(mut task) = self.tasks.remove(target) {
-                task.child.kill()?;
+            if let Some(task) = self.tasks.get_mut(target) {
+                let _ = task.child.kill(); // Try to kill, but don't fail if already dead
+                task.status = TaskStatus::Stopped;
             } else {
                 return Err(SchedulerError::InconsistentState(
                     "task missing during stop",
@@ -172,7 +206,13 @@ impl<C: TargetsCollector> Scheduler<C> {
             let task = self.start_task(fuzzer_path)?;
             self.tasks.insert(*target, task);
             let current_date = Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
-            writeln!(logfile, "[{}]{} : 0x{}", current_date, path.display(), hex::encode(target))?;
+            writeln!(
+                logfile,
+                "[{}]{} : 0x{}",
+                current_date,
+                path.display(),
+                hex::encode(target)
+            )?;
         }
 
         for &target in targets_to_check {
@@ -195,6 +235,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             };
             let fuzzer_path = path.canonicalize()?;
             let task = self.start_task(fuzzer_path)?;
+            // Replace the stopped task with the new running one
             self.tasks.insert(*target, task);
         }
 
@@ -228,11 +269,10 @@ impl<C: TargetsCollector> Scheduler<C> {
         if !fuzzer_coveragedir.exists() {
             fs::create_dir_all(&fuzzer_coveragedir)?;
         }
-        let mut child:Child;
+        let mut child: Child;
 
-        if let Some(ref container_image)=self.container_image{
-
-            if let Some(ref binary)=self.container_binary {
+        if let Some(ref container_image) = self.container_image {
+            if let Some(ref binary) = self.container_binary {
                 let mut rng = rand::rng();
                 let mut random_name: [u8; 8] = [0u8; 8];
                 rng.fill(&mut random_name);
@@ -243,11 +283,16 @@ impl<C: TargetsCollector> Scheduler<C> {
                     "--name".into(),
                     name.clone(),
                     // Set up environment variable for coverage outputs in the container
-                    "-e".into(), "LLVM_PROFILE_FILE=/fuzzer/coverage/%p.profraw".into(),
-                    "-v".into(), format!("{}:/fuzzer/binary", fuzzer_path.display()),
-                    "-v".into(), format!("{}:/fuzzer/crash_dir/", fuzzer_crashdir.display()),
-                    "-v".into(), format!("{}:/fuzzer/corpus_dir/", fuzzer_corpus.display()),
-                    "-v".into(), format!("{}:/fuzzer/coverage/", fuzzer_coveragedir.display()),
+                    "-e".into(),
+                    "LLVM_PROFILE_FILE=/fuzzer/coverage/%p.profraw".into(),
+                    "-v".into(),
+                    format!("{}:/fuzzer/binary", fuzzer_path.display()),
+                    "-v".into(),
+                    format!("{}:/fuzzer/crash_dir/", fuzzer_crashdir.display()),
+                    "-v".into(),
+                    format!("{}:/fuzzer/corpus_dir/", fuzzer_corpus.display()),
+                    "-v".into(),
+                    format!("{}:/fuzzer/coverage/", fuzzer_coveragedir.display()),
                 ];
 
                 // Then image and command
@@ -272,15 +317,17 @@ impl<C: TargetsCollector> Scheduler<C> {
                     .spawn()?;
                 if let Some(reg) = PROCESS_REGISTRY.get() {
                     if let Ok(mut v) = reg.lock() {
-                        v.push(ProcessRecord { pid: child.id(), container_name: Some(name), fuzzer_name: fuzzer_name.to_string() });
+                        v.push(ProcessRecord {
+                            pid: child.id(),
+                            container_name: Some(name),
+                            fuzzer_name: fuzzer_name.to_string(),
+                        });
                     }
                 }
-            }
-            else {
+            } else {
                 return Err(SchedulerError::MissingContainerBinary);
             }
-        }
-        else {
+        } else {
             child = Command::new(&fuzzer_path)
                 .args(&[
                     &fuzzer_corpus.display().to_string(),
@@ -295,15 +342,17 @@ impl<C: TargetsCollector> Scheduler<C> {
                         fuzzer_coveragedir.display().to_string() // Or wherever you want to store profraws; adjust as needed
                     ),
                 ])
-            .stderr(Stdio::piped())
-            .spawn()?;
+                .stderr(Stdio::piped())
+                .spawn()?;
             if let Some(reg) = PROCESS_REGISTRY.get() {
                 if let Ok(mut v) = reg.lock() {
-                    v.push(ProcessRecord { pid: child.id(), container_name: None, fuzzer_name: fuzzer_name.to_string() });
+                    v.push(ProcessRecord {
+                        pid: child.id(),
+                        container_name: None,
+                        fuzzer_name: fuzzer_name.to_string(),
+                    });
                 }
             }
-
-                
         }
         let Some(child_stderr) = child.stderr.take() else {
             return Err(SchedulerError::MissingChildStderr);
@@ -313,16 +362,49 @@ impl<C: TargetsCollector> Scheduler<C> {
             stderr: child_stderr,
             path: fuzzer_path,
             started_at: Instant::now(),
+            status: TaskStatus::Running,
         })
     }
 
-    pub fn report_crashes(&mut self) -> Result<()> {
-        let mut tasks_to_remove = Vec::new();
+    pub fn kill_tasks(&mut self) {
+        let registry = PROCESS_REGISTRY
+            .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
+            .clone();
+        if let Ok(records) = registry.lock() {
+            for rec in records.iter() {
+                info!("Killing task: {:?}", rec.fuzzer_name);
+                if let Some(name) = &rec.container_name {
+                    // Suppress stdout/stderr so as not to interfere with TUI
+                    let _ = Command::new("docker")
+                        .args(["rm", "-f", name])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                }
+                let _ = Command::new("kill")
+                    .args(["-TERM", &rec.pid.to_string()])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
+    }
 
-        for (hash, task) in self.tasks.iter_mut() {
+    pub fn report_crashes(&mut self) -> Result<()> {
+        for (_hash, task) in self.tasks.iter_mut() {
+            // Only check tasks that are still running
+            if task.status != TaskStatus::Running {
+                continue;
+            }
+
             match task.child.try_wait() {
-                Ok(None) => {}
+                Ok(None) => {
+                    // Task is still running, keep it as Running
+                }
                 Ok(Some(_)) => {
+                    // Task has exited - mark as crashed and report it
+                    task.status = TaskStatus::Crashed;
+
                     let mut stderr = String::new();
                     task.stderr.read_to_string(&mut stderr)?;
                     info!(
@@ -350,7 +432,12 @@ impl<C: TargetsCollector> Scheduler<C> {
                             SchedulerError::InconsistentState("invalid fuzzer path name"),
                         )?;
                         let filename = &crash_corpus["/fuzzer/crash_dir/".len()..];
-                        crash_corpus = self.crashes_directory.join(fuzzer_name).join(filename).to_string_lossy().to_string();
+                        crash_corpus = self
+                            .crashes_directory
+                            .join(fuzzer_name)
+                            .join(filename)
+                            .to_string_lossy()
+                            .to_string();
                     }
                     info!("crash_corpus: {:?}", crash_corpus);
                     let crashing_instance =
@@ -369,23 +456,21 @@ impl<C: TargetsCollector> Scheduler<C> {
                             scheduler_name: self.scheduler_name.clone(),
                         })
                         .send()?;
-                    tasks_to_remove.push(*hash);
+                    // Task is kept in self.tasks with status Crashed, not removed
                 }
                 Err(e) => return Err(SchedulerError::Io(e)),
             }
         }
-
-        for task_to_remove in tasks_to_remove.iter() {
-            self.tasks.remove(task_to_remove);
-        }
         Ok(())
     }
 
-    pub fn running_tasks_info(&self) -> Vec<(Sha, PathBuf, std::time::Duration)> {
-        self.tasks
-            .iter()
-            .map(|(sha, task)| (*sha, task.path.clone(), task.started_at.elapsed()))
-            .collect()
+    /// Get tasks with their status (running or stopped)
+    pub fn get_tasks_with_status(&mut self) -> Vec<(Sha, PathBuf, TaskStatus)> {
+        let mut result = Vec::new();
+        for (sha, task) in self.tasks.iter_mut() {
+            result.push((*sha, task.path.clone(), task.status));
+        }
+        result
     }
 
     pub fn log_running_tasks(&self) {
@@ -395,7 +480,7 @@ impl<C: TargetsCollector> Scheduler<C> {
         }
         info!("Running tasks:");
         for (sha, task) in self.tasks.iter() {
-            let secs = task.started_at.elapsed().as_secs();
+            let secs: u64 = task.started_at.elapsed().as_secs();
             let d = TimeDelta::new(secs as i64, 0).expect("Failed to create TimeDelta");
             info!(
                 "- '{}:0x{}' has been running for {:?}",
@@ -412,34 +497,16 @@ impl<C: TargetsCollector> Scheduler<C> {
                 for rec in records.iter() {
                     info!("collecting coverage for: {:?}", rec);
                     if let Some(name) = &rec.container_name {
-                        let _ = Command::new("docker").args(["exec", name, "pkill", "-SIGUSR1", &rec.fuzzer_name]).status();
-                    }
-                    else {
-                        let _ = Command::new("pkill").args(["-SIGUSR1", &rec.fuzzer_name]).status();
+                        let _ = Command::new("docker")
+                            .args(["exec", name, "pkill", "-SIGUSR1", &rec.fuzzer_name])
+                            .status();
+                    } else {
+                        let _ = Command::new("pkill")
+                            .args(["-SIGUSR1", &rec.fuzzer_name])
+                            .status();
                     }
                 }
             }
         }
     }
-}
-
-/// A fuzzing task to be scheduled by the [`Scheduler`]
-#[derive(Debug)]
-struct Task {
-    /// Path of the fuzzer binary
-    path: PathBuf,
-    /// The fuzzer process
-    child: Child,
-    /// The stderr of the fuzzer process
-    stderr: ChildStderr,
-    started_at: Instant,
-}
-
-#[derive(Serialize, Clone)]
-struct CrashReport {
-    report: Vec<u8>,
-    input: Vec<u8>,
-    filename: String,
-    program: Vec<u8>,
-    scheduler_name: String,
 }

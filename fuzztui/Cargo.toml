@@ -1,0 +1,18 @@
+[package]
+name = "fuzztui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+crossterm = "0.29.0"
+ratatui = "0.29.0"
+serde_json = "1.0.145"
+scheduler = { path = "../scheduler" }
+chrono = "0.4.42"
+reqwest = { version = "0.12.19", features = ["json", "blocking"] }
+ftail = "0.3"
+log = "0.4.28"
+serde = "1.0.228"
+humantime = "2.3.0"
+sha3 = "0.10.8"
+hex = "0.4"

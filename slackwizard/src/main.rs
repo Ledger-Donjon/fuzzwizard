@@ -1,4 +1,6 @@
 use chrono::{NaiveDate, NaiveDateTime};
+use ftail::Ftail;
+use log::LevelFilter;
 use log::info;
 use reqwest::Url;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap};
@@ -14,27 +16,6 @@ struct Payload {
     text: String,
     channel: String,
 }
-
-/*SEND FILE TEST
-#[derive(Serialize,Deserialize)]
-struct FileInfo {
-    id: String,
-    title: String,
-}
-
-#[derive(Serialize)]
-struct Payload2 {
-    files: Vec<FileInfo>,
-    channel_id: String,
-}
-
-#[derive(Deserialize)]
-struct JsonFileResponse {
-    ok: bool,
-    upload_url: String,
-    file_id: String,
-}
-*/
 
 #[derive(Deserialize, Serialize, Clone)]
 struct CrashReport {
@@ -82,73 +63,21 @@ fn send_message_to_channel(report: CrashReport) {
         .unwrap();
     info!("slack status: {:?}", res.status());
     info!("slack body: {:?}", res.text());
-
-    // Wait for file:write has been enabled on slack channel
-    //let mut file = File::create("/tmp/fuzz_error.bin").unwrap();
-    //file.write_all(&report.program);
-    /* SEND FILES TEST
-    let mut headers = HeaderMap::new();
-    headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
-    //headers.insert(ACCEPT_CHARSET, "utf-8".parse().unwrap());
-    headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
-
-    let test = "toto";
-    //let content = String::from_utf8_lossy(&report.program).to_string();
-
-    let mut params = HashMap::new();
-    let l = test.len().to_string();
-    params.insert("filename", "fuzz_program.bin");
-    params.insert("length", &l);
-
-    let slack_url_info = client
-        .get("https://slack.com/api/files.getUploadURLExternal")
-        .headers(headers.clone())
-        .query(&params)
-        .send()
-        .unwrap();
-
-    println!("{:?}", slack_url_info.status());
-    //println!("{:?}", slack_url_info.text());
-
-    let parsed_elt: JsonFileResponse = serde_json::from_str(&slack_url_info.text().unwrap()).expect("NOT OK");
-    println!("ok: {}", parsed_elt.ok);
-    println!("upload_url: {}", parsed_elt.upload_url);
-    println!("file_id: {}", parsed_elt.file_id);
-
-
-    if parsed_elt.ok{
-        let send_file = client
-            .post(parsed_elt.upload_url)
-            .body(test)
-            .send()
-            .unwrap();
-
-        println!("{:?}", send_file.status());
-        println!("{:?}", send_file.text());
-
-        let rep_files = FileInfo {
-            id: parsed_elt.file_id,
-            title: "fuzz_program.bin".to_owned(),
-        };
-
-        let complete = client
-            .post("https://slack.com/api/files.completeUploadExternal")
-            .headers(headers.clone())
-            .json(&Payload2 {
-                files: vec![rep_files],
-                channel_id: "CHANGE_ME".to_owned(),
-            })
-            .send()
-            .unwrap();
-
-        println!("{:?}", complete.status());
-        println!("{:?}", complete.text());
-    }
-    */
 }
 
 fn main() {
-    env_logger::init();
+    // Configure ftail to write to a file
+    let log_file_path = "./logs/slackwizard.log";
+    // Ensure logs directory exists
+    if let Err(e) = std::fs::create_dir_all("./logs") {
+        eprintln!("Failed to create log directory './logs': {}", e);
+        std::process::exit(1);
+    }
+
+    Ftail::new()
+        .single_file(std::path::Path::new(log_file_path), true, LevelFilter::Info)
+        .init()
+        .expect("Failed to initialize logger");
 
     let file_path = "/tmp/fuzzwizzard_date_file.txt";
     let mut file;
