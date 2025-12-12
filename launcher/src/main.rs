@@ -76,10 +76,8 @@ fn main() {
     } else {
         PathBuf::from("config.json")
     };
-    let config_file = std::fs::read_to_string(&config_path).expect(&format!(
-        "Failed to read config file: {}",
-        config_path.display()
-    ));
+    let config_file = std::fs::read_to_string(&config_path)
+        .unwrap_or_else(|_| panic!("Failed to read config file: {}", config_path.display()));
 
     let config_json: Config =
         serde_json::from_str(&config_file).expect("Failed to parse config.json");
@@ -136,15 +134,14 @@ fn main() {
             .current_dir(&scheduler.path)
             .arg("run")
             .arg(scheduler.config)
-            .arg(config_json.logdir.to_string())
-            .arg(&format!(
-                "{}",
+            .arg(&config_json.logdir)
+            .arg(
                 if let Some(ref container_binary) = config_json.container_binary {
                     container_binary.to_string()
                 } else {
                     "".to_string()
-                }
-            ))
+                },
+            )
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .spawn()
@@ -233,16 +230,15 @@ fn main() {
                     .env("RUST_LOG", "info")
                     .current_dir(&scheduler.path)
                     .arg("run")
-                    .arg(scheduler.config.to_string())
-                    .arg(config_json.logdir.to_string())
-                    .arg(format!(
-                        "{}",
+                    .arg(&scheduler.config)
+                    .arg(&config_json.logdir)
+                    .arg(
                         if let Some(ref container_binary) = config_json.container_binary {
                             container_binary.to_string()
                         } else {
                             "".to_string()
-                        }
-                    ))
+                        },
+                    )
                     .stdout(Stdio::inherit())
                     .stderr(Stdio::inherit())
                     .spawn()

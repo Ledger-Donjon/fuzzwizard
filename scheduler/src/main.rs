@@ -102,7 +102,7 @@ fn main() {
         targets_directories: config_json
             .targets_directory
             .iter()
-            .map(|p| PathBuf::from(p))
+            .map(PathBuf::from)
             .collect(),
     };
     build_targets(config_json.clone());

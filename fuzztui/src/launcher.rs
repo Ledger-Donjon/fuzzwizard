@@ -96,7 +96,7 @@ impl Launcher {
         }
     }
 
-    pub fn init(self: &mut Self) {
+    pub fn init(&mut self) {
         if self.config_json.schedulers.is_empty() {
             panic!("schedulers array in config.json must not be empty");
         }
@@ -132,7 +132,7 @@ impl Launcher {
                 Instant::now(),
                 scheduler_started,
                 config,
-                last_build_at.clone(),
+                last_build_at,
             ));
             std::thread::sleep(Duration::from_secs(2));
         }
@@ -198,6 +198,7 @@ impl Launcher {
             }
         };
         self.config_json = config_json;
+        self.config_status = String::from("Config loaded successfully");
         self.last_config_update = std::time::Instant::now();
 
         // Remove schedulers that are gone from config
@@ -208,38 +209,37 @@ impl Launcher {
             .map(|s| s.name.clone())
             .collect();
         for i in (0..self.scheduler_processes.len()).rev() {
-            if matches!(self.scheduler_processes[i].status, ProcessStatus::Running) {
-                if !scheduler_names_in_config.contains(&self.scheduler_processes[i].name) {
-                    self.scheduler_processes[i].scheduler.kill_tasks();
-                    // TODO: send slack alert if desired
-                    self.scheduler_processes[i].info = format!(
-                        "scheduler '{}' stopped: removed from config",
-                        self.scheduler_processes[i].name.clone()
-                    );
-                    self.scheduler_processes[i].status = ProcessStatus::Stopped;
-                }
+            if matches!(self.scheduler_processes[i].status, ProcessStatus::Running)
+                && !scheduler_names_in_config.contains(&self.scheduler_processes[i].name)
+            {
+                self.scheduler_processes[i].scheduler.kill_tasks();
+                // TODO: send slack alert if desired
+                self.scheduler_processes[i].info = format!(
+                    "scheduler '{}' stopped: removed from config",
+                    self.scheduler_processes[i].name.clone()
+                );
+                self.scheduler_processes[i].status = ProcessStatus::Stopped;
             }
         }
 
         // Launch schedulers that are new in config
         for scheduler in &self.config_json.schedulers {
             for sched_proc in &mut self.scheduler_processes {
-                if sched_proc.name == scheduler.name {
-                    if matches!(sched_proc.status, ProcessStatus::Stopped) {
-                        let (scheduler_started, config, last_build_at) = create_scheduler(
-                            &scheduler.config.clone(),
-                            self.config_json.logdir.clone(),
-                            self.config_json.container_binary.clone(),
-                        );
-                        sched_proc.path = PathBuf::from(scheduler.path.clone());
-                        sched_proc.started_at = Instant::now();
-                        sched_proc.scheduler = scheduler_started;
-                        sched_proc.config = config;
-                        sched_proc.last_build_at = last_build_at;
-                        sched_proc.status = ProcessStatus::Running;
-                        sched_proc.info =
-                            format!("Scheduler '{}' is active", sched_proc.name.clone());
-                    }
+                if sched_proc.name == scheduler.name
+                    && matches!(sched_proc.status, ProcessStatus::Stopped)
+                {
+                    let (scheduler_started, config, last_build_at) = create_scheduler(
+                        &scheduler.config.clone(),
+                        self.config_json.logdir.clone(),
+                        self.config_json.container_binary.clone(),
+                    );
+                    sched_proc.path = PathBuf::from(scheduler.path.clone());
+                    sched_proc.started_at = Instant::now();
+                    sched_proc.scheduler = scheduler_started;
+                    sched_proc.config = config;
+                    sched_proc.last_build_at = last_build_at;
+                    sched_proc.status = ProcessStatus::Running;
+                    sched_proc.info = format!("Scheduler '{}' is active", sched_proc.name.clone());
                 }
             }
             let already_running = self
@@ -258,7 +258,7 @@ impl Launcher {
                     Instant::now(),
                     scheduler_started,
                     config,
-                    last_build_at.clone(),
+                    last_build_at,
                 ));
             }
         }
@@ -388,8 +388,8 @@ impl SchedulerProcess {
             scheduler,
             info: format!("Scheduler {} started", name.clone()).to_string(),
             status: ProcessStatus::Running,
-            config: config,
-            last_build_at: last_build_at,
+            config,
+            last_build_at,
         }
     }
 }
@@ -478,7 +478,7 @@ fn build_targets(config_json: scheduler::SchedulerConfig) -> Option<Instant> {
             error!("Failed to run build_script: {}", e);
         }
     }
-    return None;
+    None
 }
 
 fn create_scheduler(
@@ -492,7 +492,7 @@ fn create_scheduler(
 ) {
     info!("Reading config file {}\n", config_path);
     let config_contents = fs::read_to_string(config_path)
-        .expect(&format!("Failed to read config file {}", config_path));
+        .unwrap_or_else(|_| panic!("Failed to read config file {}", config_path));
 
     // If logdir does not exist, create it
     if let Err(e) = std::fs::create_dir_all(&logdir) {
@@ -507,7 +507,7 @@ fn create_scheduler(
         targets_directories: config_json
             .targets_directory
             .iter()
-            .map(|p| PathBuf::from(p))
+            .map(PathBuf::from)
             .collect(),
     };
     let last_build_at = build_targets(config_json.clone());
@@ -517,5 +517,5 @@ fn create_scheduler(
         container_binary.map(PathBuf::from),
     );
 
-    return (scheduler, config_json.clone(), last_build_at);
+    (scheduler, config_json.clone(), last_build_at)
 }

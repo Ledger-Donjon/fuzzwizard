@@ -1,5 +1,4 @@
 use chrono::{TimeDelta, prelude::*};
-use hex;
 use humantime::format_duration;
 use log::{debug, info};
 use rand::Rng;
@@ -298,9 +297,9 @@ impl<C: TargetsCollector> Scheduler<C> {
                 // Then image and command
                 args.push(container_image.clone());
                 if let Some(ref opts) = self.container_options {
-                    if opts.len() > 0 {
+                    if !opts.is_empty() {
                         for opt in opts {
-                            if opt != "" {
+                            if !opt.is_empty() {
                                 args.push(opt.clone());
                             }
                         }
@@ -313,7 +312,8 @@ impl<C: TargetsCollector> Scheduler<C> {
 
                 child = Command::new(binary)
                     .args(args.iter().map(|s| s.as_str()))
-                    .stderr(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
                     .spawn()?;
                 if let Some(reg) = PROCESS_REGISTRY.get() {
                     if let Ok(mut v) = reg.lock() {
@@ -329,17 +329,13 @@ impl<C: TargetsCollector> Scheduler<C> {
             }
         } else {
             child = Command::new(&fuzzer_path)
-                .args(&[
+                .args([
                     &fuzzer_corpus.display().to_string(),
-                    &format!(
-                        "-artifact_prefix={}{}",
-                        fuzzer_crashdir.display().to_string(),
-                        "/"
-                    ),
+                    &format!("-artifact_prefix={}{}", fuzzer_crashdir.display(), "/"),
                     // coverage file output option
                     &format!(
                         "-LLVM_PROFILE_FILE={}/%p.profraw",
-                        fuzzer_coveragedir.display().to_string() // Or wherever you want to store profraws; adjust as needed
+                        fuzzer_coveragedir.display() // Or wherever you want to store profraws; adjust as needed
                     ),
                 ])
                 .stderr(Stdio::piped())
@@ -374,12 +370,14 @@ impl<C: TargetsCollector> Scheduler<C> {
             for rec in records.iter() {
                 info!("Killing task: {:?}", rec.fuzzer_name);
                 if let Some(name) = &rec.container_name {
-                    // Suppress stdout/stderr so as not to interfere with TUI
-                    let _ = Command::new("docker")
-                        .args(["rm", "-f", name])
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
+                    if let Some(ref binary) = self.container_binary {
+                        // Suppress stdout/stderr so as not to interfere with TUI
+                        let _ = Command::new(binary)
+                            .args(["rm", "-f", name])
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status();
+                    }
                 }
                 let _ = Command::new("kill")
                     .args(["-TERM", &rec.pid.to_string()])
@@ -418,8 +416,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                     // Get crashing corpus instance
                     let crash = stderr
                         .lines()
-                        .filter(|l| l.starts_with("artifact_prefix="))
-                        .next()
+                        .find(|l| l.starts_with("artifact_prefix="))
                         .unwrap_or("Crash detected but no element in stderr");
                     let pattern = "Test unit written to ";
                     let crash_corpus = &crash[crash.find(pattern).unwrap_or(0) + pattern.len()..];
@@ -497,12 +494,21 @@ impl<C: TargetsCollector> Scheduler<C> {
                 for rec in records.iter() {
                     info!("collecting coverage for: {:?}", rec);
                     if let Some(name) = &rec.container_name {
-                        let _ = Command::new("docker")
-                            .args(["exec", name, "pkill", "-SIGUSR1", &rec.fuzzer_name])
-                            .status();
+                        if let Some(ref binary) = self.container_binary {
+                            let _ = Command::new(binary)
+                                .args(["exec", name, "pkill", "-SIGUSR1", "-f", &rec.fuzzer_name])
+                                .status();
+                            debug!(
+                                "coverage collected  '{} ' '{} ' '{} ' '{} '",
+                                binary.display(),
+                                name,
+                                "pkill -SIGUSR1 -f",
+                                &rec.fuzzer_name
+                            );
+                        }
                     } else {
                         let _ = Command::new("pkill")
-                            .args(["-SIGUSR1", &rec.fuzzer_name])
+                            .args(["-SIGUSR1", "-f", &rec.fuzzer_name])
                             .status();
                     }
                 }

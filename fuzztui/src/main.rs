@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 mod launcher;
 use ftail::Ftail;
-use hex;
 use humantime::format_duration;
 use launcher::{Launcher, ProcessStatus, require_env};
 use log::{LevelFilter, error, info};
@@ -579,10 +578,8 @@ fn main() -> io::Result<()> {
     let slack_token = require_env("SLACK_TOKEN");
     let slack_channel = require_env("SLACK_CHANNEL");
 
-    let str_config_file = std::fs::read_to_string(config_path.clone()).expect(&format!(
-        "Failed to read config file {}",
-        config_path.display()
-    ));
+    let str_config_file = std::fs::read_to_string(config_path.clone())
+        .unwrap_or_else(|_| panic!("Failed to read config file {}", config_path.display()));
     let config_json = serde_json::from_str::<launcher::Config>(&str_config_file)
         .expect("Failed to parse config.json");
 
