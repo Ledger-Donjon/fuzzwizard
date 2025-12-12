@@ -46,6 +46,7 @@ fn fuzzer_report_crashes() {
             .into(),
         container_image: None,
         container_options: None,
+        has_coverage: false,
     };
 
     let mut scheduler = Scheduler::new(collector, config, None);

@@ -46,6 +46,7 @@ pub struct SchedulerConfig {
     pub coverage_directory: String,
     pub container_image: Option<String>,
     pub container_options: Option<Vec<String>>,
+    pub has_coverage: bool,
 }
 
 /// Convenient result alias for the scheduler crate
@@ -82,6 +83,7 @@ pub struct Scheduler<C: TargetsCollector> {
     container_image: Option<String>,
     container_binary: Option<PathBuf>,
     container_options: Option<Vec<String>>,
+    has_coverage: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -160,6 +162,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             container_options: config.container_options,
             container_binary,
             coverage_directory: config.coverage_directory.into(),
+            has_coverage: config.has_coverage,
         }
     }
 
@@ -274,7 +277,9 @@ impl<C: TargetsCollector> Scheduler<C> {
             if let Some(ref binary) = self.container_binary {
                 let mut rng = rand::rng();
                 let mut random_name: [u8; 8] = [0u8; 8];
+                let mut random_cov: [u8; 8] = [0u8; 8];
                 rng.fill(&mut random_name);
+                rng.fill(&mut random_cov);
                 let name = format!("docker-fw-{}-{}", hex::encode(random_name), fuzzer_name);
                 let mut args: Vec<String> = vec![
                     "run".into(),
@@ -283,7 +288,10 @@ impl<C: TargetsCollector> Scheduler<C> {
                     name.clone(),
                     // Set up environment variable for coverage outputs in the container
                     "-e".into(),
-                    "LLVM_PROFILE_FILE=/fuzzer/coverage/%p.profraw".into(),
+                    format!(
+                        "LLVM_PROFILE_FILE=/fuzzer/coverage/%p_{}.profraw",
+                        hex::encode(random_cov)
+                    ),
                     "-v".into(),
                     format!("{}:/fuzzer/binary", fuzzer_path.display()),
                     "-v".into(),
@@ -312,8 +320,7 @@ impl<C: TargetsCollector> Scheduler<C> {
 
                 child = Command::new(binary)
                     .args(args.iter().map(|s| s.as_str()))
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
+                    .stderr(Stdio::piped())
                     .spawn()?;
                 if let Some(reg) = PROCESS_REGISTRY.get() {
                     if let Ok(mut v) = reg.lock() {
@@ -489,6 +496,9 @@ impl<C: TargetsCollector> Scheduler<C> {
     }
 
     pub fn collect_coverage(&self) {
+        if !self.has_coverage {
+            return;
+        }
         if let Some(registry) = PROCESS_REGISTRY.get() {
             if let Ok(records) = registry.lock() {
                 for rec in records.iter() {
@@ -496,7 +506,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                     if let Some(name) = &rec.container_name {
                         if let Some(ref binary) = self.container_binary {
                             let _ = Command::new(binary)
-                                .args(["exec", name, "pkill", "-SIGUSR1", "-f", &rec.fuzzer_name])
+                                .args(["exec", name, "pkill", "-SIGUSR1", "-f", "binary"])
                                 .status();
                             debug!(
                                 "coverage collected  '{} ' '{} ' '{} ' '{} '",

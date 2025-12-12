@@ -49,6 +49,7 @@ fn directory_collector() {
         container_image: None,
         container_options: None,
         backend_url: "http://127.0.0.1:0".to_string(),
+        has_coverage: false,
     };
 
     let mut scheduler = Scheduler::new(collector, config, None);
