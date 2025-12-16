@@ -134,13 +134,36 @@ fn install_ctrlc_handler() {
         if let Ok(records) = registry.lock() {
             for rec in records.iter() {
                 if let Some(name) = &rec.container_name {
-                    let _ = Command::new("docker").args(["rm", "-f", name]).status();
-                }
-                let _ = Command::new("kill")
-                    .args(["-TERM", &rec.pid.to_string()])
-                    .status();
+                    // Try docker first, then podman (non-blocking spawn)
+                    let name_clone = name.clone();
+                    let _ = Command::new("docker")
+                        .args(["rm", "-f", &name_clone])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .or_else(|_| {
+                            // Fallback to podman
+                            Command::new("podman")
+                                .args(["rm", "-f", &name_clone])
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .status()
+                        });
+                };
+                // Spawn kill command non-blocking
+                let pid = rec.pid;
+                let _ = std::thread::spawn(move || {
+                    let _ = Command::new("kill")
+                        .args(["-TERM", &pid.to_string()])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .and_then(|mut child| child.wait());
+                });
             }
         }
+        // Give a small delay for commands to start, then exit
+        std::thread::sleep(std::time::Duration::from_millis(100));
         std::process::exit(130);
     });
 }
@@ -378,19 +401,29 @@ impl<C: TargetsCollector> Scheduler<C> {
                 info!("Killing task: {:?}", rec.fuzzer_name);
                 if let Some(name) = &rec.container_name {
                     if let Some(ref binary) = self.container_binary {
-                        // Suppress stdout/stderr so as not to interfere with TUI
-                        let _ = Command::new(binary)
-                            .args(["rm", "-f", name])
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .status();
+                        // Spawn non-blocking: fire and forget
+                        let binary_clone = binary.clone();
+                        let name_clone = name.clone();
+                        let _ = std::thread::spawn(move || {
+                            let _ = Command::new(&binary_clone)
+                                .args(["rm", "-f", &name_clone])
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .spawn()
+                                .and_then(|mut child| child.wait());
+                        });
                     }
                 }
-                let _ = Command::new("kill")
-                    .args(["-TERM", &rec.pid.to_string()])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
+                // Spawn non-blocking: fire and forget
+                let pid = rec.pid;
+                let _ = std::thread::spawn(move || {
+                    let _ = Command::new("kill")
+                        .args(["-TERM", &pid.to_string()])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .and_then(|mut child| child.wait());
+                });
             }
         }
     }
@@ -502,24 +535,50 @@ impl<C: TargetsCollector> Scheduler<C> {
         if let Some(registry) = PROCESS_REGISTRY.get() {
             if let Ok(records) = registry.lock() {
                 for rec in records.iter() {
-                    info!("collecting coverage for: {:?}", rec);
+                    info!(
+                        "collecting coverage for: {:?} for {}",
+                        rec, self.scheduler_name
+                    );
                     if let Some(name) = &rec.container_name {
                         if let Some(ref binary) = self.container_binary {
-                            let _ = Command::new(binary)
-                                .args(["exec", name, "pkill", "-SIGUSR1", "-f", "binary"])
-                                .status();
-                            debug!(
-                                "coverage collected  '{} ' '{} ' '{} ' '{} '",
-                                binary.display(),
-                                name,
-                                "pkill -SIGUSR1 -f",
-                                &rec.fuzzer_name
-                            );
+                            // Spawn non-blocking: fire and forget
+                            let binary_clone = binary.clone();
+                            let name_clone = name.clone();
+                            let fuzzer_name_clone = rec.fuzzer_name.clone();
+                            let _ = std::thread::spawn(move || {
+                                let _ = Command::new(&binary_clone)
+                                    .args([
+                                        "exec",
+                                        &name_clone,
+                                        "pkill",
+                                        "-SIGUSR1",
+                                        "-f",
+                                        "binary",
+                                    ])
+                                    .stdout(std::process::Stdio::null())
+                                    .stderr(std::process::Stdio::null())
+                                    .spawn()
+                                    .and_then(|mut child| child.wait());
+                                debug!(
+                                    "coverage collected  '{} ' '{} ' '{} ' '{} '",
+                                    binary_clone.display(),
+                                    name_clone,
+                                    "pkill -SIGUSR1 -f",
+                                    fuzzer_name_clone
+                                );
+                            });
                         }
                     } else {
-                        let _ = Command::new("pkill")
-                            .args(["-SIGUSR1", "-f", &rec.fuzzer_name])
-                            .status();
+                        // Spawn non-blocking: fire and forget
+                        let fuzzer_name_clone = rec.fuzzer_name.clone();
+                        let _ = std::thread::spawn(move || {
+                            let _ = Command::new("pkill")
+                                .args(["-SIGUSR1", "-f", &fuzzer_name_clone])
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .spawn()
+                                .and_then(|mut child| child.wait());
+                        });
                     }
                 }
             }

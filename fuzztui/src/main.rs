@@ -2,6 +2,8 @@ use chrono::{NaiveDateTime, TimeDelta};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use std::io;
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 mod launcher;
 use ftail::Ftail;
@@ -69,6 +71,12 @@ impl TabsState {
     }
 }
 
+#[derive(Debug, Clone)]
+struct UpdateMessage {
+    crashes: Vec<CrashInfo>,
+    last_crashes_date: Option<NaiveDateTime>,
+}
+
 #[derive(Debug)]
 pub struct App<'a> {
     tabs: TabsState,
@@ -78,10 +86,51 @@ pub struct App<'a> {
     crashes: Vec<CrashInfo>,
     last_crashes_date: Option<NaiveDateTime>,
     last_update: Option<Instant>,
+    update_sender: Option<mpsc::Sender<Option<NaiveDateTime>>>,
+    update_receiver: Option<mpsc::Receiver<UpdateMessage>>,
+    pending_update: bool,
 }
 
 impl<'a> App<'a> {
     pub fn default(launcher: &'a mut Launcher, initial_date: Option<NaiveDateTime>) -> Self {
+        // Create channels for async crash updates
+        let (update_sender, update_receiver_main) = mpsc::channel();
+        let (update_sender_main, update_receiver) = mpsc::channel();
+
+        // Spawn background thread for crash updates only
+        thread::spawn(move || {
+            loop {
+                // Wait for update request with last_crashes_date
+                match update_receiver_main.recv() {
+                    Ok(Some(last_date)) => {
+                        info!("Background thread: Updating crashes");
+                        let crashes_result = Self::update_crashes_async(Some(last_date));
+
+                        if let Ok((crashes, new_last_date)) = crashes_result {
+                            let _ = update_sender_main.send(UpdateMessage {
+                                crashes,
+                                last_crashes_date: new_last_date,
+                            });
+                        }
+                    }
+                    Ok(None) => {
+                        info!("Background thread: Updating crashes (initial)");
+                        let crashes_result = Self::update_crashes_async(None);
+
+                        if let Ok((crashes, last_date)) = crashes_result {
+                            let _ = update_sender_main.send(UpdateMessage {
+                                crashes,
+                                last_crashes_date: last_date,
+                            });
+                        }
+                    }
+                    Err(_) => {
+                        break; // Channel closed, exit thread
+                    }
+                }
+            }
+        });
+
         let mut app = Self {
             tabs: TabsState::new(vec![]),
             launcher: Some(launcher),
@@ -90,19 +139,94 @@ impl<'a> App<'a> {
             crashes: Vec::new(),
             last_crashes_date: initial_date,
             last_update: None,
+            update_sender: Some(update_sender),
+            update_receiver: Some(update_receiver),
+            pending_update: false,
         };
         app.sync_tabs_with_schedulers();
         app.update_tasks_info();
+        // Initial synchronous update
         app.update_crashes();
         app
+    }
+
+    fn update_crashes_async(
+        last_crashes_date: Option<NaiveDateTime>,
+    ) -> Result<(Vec<CrashInfo>, Option<NaiveDateTime>), ()> {
+        let client = reqwest::blocking::Client::new();
+        let mut url = Url::parse("http://127.0.0.1:3000/crashes").map_err(|_| ())?;
+
+        if let Some(ref most_recent_date) = last_crashes_date {
+            url.query_pairs_mut().append_pair(
+                "after",
+                &most_recent_date.format("%Y-%m-%d %H:%M:%S%.f").to_string(),
+            );
+        }
+
+        let response = client.get(url.as_str()).send().map_err(|_| ())?;
+
+        if response.status().is_success() {
+            let crashes_json: Vec<serde_json::Value> = response.json().map_err(|_| ())?;
+
+            let mut new_crashes: Vec<CrashInfo> = crashes_json
+                .into_iter()
+                .filter_map(|crash| {
+                    let id = crash.get("id")?.as_i64()? as i32;
+                    let filename = crash.get("filename")?.as_str()?.to_string();
+                    let scheduler_name = crash.get("scheduler_name")?.as_str()?.to_string();
+
+                    let created_at = if let Some(date_str) = crash.get("created_at")?.as_str() {
+                        date_str.to_string()
+                    } else {
+                        format!("{:?}", crash.get("created_at"))
+                    };
+
+                    Some(CrashInfo {
+                        id,
+                        filename,
+                        scheduler_name,
+                        created_at: NaiveDateTime::parse_from_str(
+                            &created_at,
+                            "%Y-%m-%dT%H:%M:%S%.f",
+                        )
+                        .ok()?,
+                    })
+                })
+                .collect();
+
+            if !new_crashes.is_empty() {
+                new_crashes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                let last_date = new_crashes.first().map(|c| c.created_at);
+                Ok((new_crashes, last_date))
+            } else {
+                Ok((Vec::new(), last_crashes_date))
+            }
+        } else {
+            Ok((Vec::new(), last_crashes_date))
+        }
     }
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         terminal.clear()?;
         while !self.exit {
             self.sync_tabs_with_schedulers();
             self.update_tasks_info();
-            use std::time::{Duration, Instant};
-            // Static to store last update time, only update every minute
+
+            // Check for crash updates from background thread (non-blocking)
+            if let Some(ref receiver) = self.update_receiver {
+                while let Ok(update_msg) = receiver.try_recv() {
+                    // Merge new crashes with existing ones
+                    self.crashes.append(&mut update_msg.crashes.clone());
+                    self.crashes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                    self.crashes.truncate(10);
+
+                    if let Some(date) = update_msg.last_crashes_date {
+                        self.last_crashes_date = Some(date);
+                    }
+                    self.pending_update = false;
+                }
+            }
+
+            // Update proc status (fast, non-blocking)
             {
                 if self.tabs.index == 0 {
                     self.launcher.as_mut().unwrap().update_proc_status();
@@ -123,14 +247,20 @@ impl<'a> App<'a> {
                         self.last_update = Some(now);
                     }
                 }
-                if should_update {
-                    info!("Updating views");
-                    self.update_crashes();
+
+                if should_update && !self.pending_update {
+                    // Trigger background crash update (non-blocking)
+                    if let Some(ref sender) = self.update_sender {
+                        let _ = sender.send(self.last_crashes_date);
+                        self.pending_update = true;
+                    }
+
+                    // Update launcher status (can be slow, but we do it here)
+                    // This could also be made async if needed, but it's less critical
                     self.launcher.as_mut().unwrap().update_status();
                 }
             }
-            //self.launcher.as_mut().unwrap().collect_proc_info();
-            //self.launcher.as_mut().unwrap().collect_scheduler();
+
             terminal.draw(|frame: &mut Frame<'_>| self.draw(frame))?;
             self.handle_events()?;
         }

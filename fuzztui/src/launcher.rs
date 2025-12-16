@@ -6,6 +6,7 @@ use sha3::{Digest, Sha3_256};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 use std::{collections::HashMap, fmt, fs};
 
@@ -265,8 +266,13 @@ impl Launcher {
 
         // Update info string, targets, coverage, and crash report for each scheduler
         for sched_proc in &mut self.scheduler_processes {
-            // Optionally: re-build targets if configuration changed
-            sched_proc.last_build_at = build_targets(sched_proc.config.clone());
+            // Optionally: re-build targets if configuration changed (non-blocking)
+            // The build happens in background, we update last_build_at optimistically
+            let build_result = build_targets(sched_proc.config.clone());
+            if let Some(build_time) = build_result {
+                sched_proc.last_build_at = Some(build_time);
+            }
+
             let _update = sched_proc
                 .scheduler
                 .update(self.config_json.logdir.clone().as_str());
@@ -457,28 +463,39 @@ fn send_slack_alert(token: &str, channel: &str, text: &str, should_send: bool) {
 }
 
 fn build_targets(config_json: scheduler::SchedulerConfig) -> Option<Instant> {
-    // Run build_script every minute
+    // Run build_script in background thread (non-blocking)
     let now = Instant::now();
+    let scheduler_name = config_json.scheduler_name.clone();
+    let build_script = config_json.build_script.clone();
 
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(config_json.build_script)
-        .stdout(Stdio::null()) // Masquer la sortie standard
-        .stderr(Stdio::null()) // Masquer la sortie d'erreur
-        .status();
-    match status {
-        Ok(s) if s.success() => {
-            info!("build_script ran successfully");
-            return Some(now);
+    // Spawn non-blocking build in background thread
+    thread::spawn(move || {
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(&build_script)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .and_then(|mut child| child.wait());
+
+        match status {
+            Ok(s) if s.success() => {
+                info!("build_script ran successfully for {}", scheduler_name);
+            }
+            Ok(s) => {
+                error!(
+                    "build_script exited with status: {} for {}",
+                    s, scheduler_name
+                );
+            }
+            Err(e) => {
+                error!("Failed to run build_script for {}: {}", scheduler_name, e);
+            }
         }
-        Ok(s) => {
-            error!("build_script exited with status: {}", s);
-        }
-        Err(e) => {
-            error!("Failed to run build_script: {}", e);
-        }
-    }
-    None
+    });
+
+    // Return immediately with current time, build happens in background
+    Some(now)
 }
 
 fn create_scheduler(
