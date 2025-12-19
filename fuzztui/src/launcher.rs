@@ -268,7 +268,7 @@ impl Launcher {
         for sched_proc in &mut self.scheduler_processes {
             // Optionally: re-build targets if configuration changed (non-blocking)
             // The build happens in background, we update last_build_at optimistically
-            let build_result = build_targets(sched_proc.config.clone());
+            let build_result = build_targets(sched_proc.config.clone(), sched_proc.last_build_at);
             if let Some(build_time) = build_result {
                 sched_proc.last_build_at = Some(build_time);
             }
@@ -462,11 +462,16 @@ fn send_slack_alert(token: &str, channel: &str, text: &str, should_send: bool) {
         .send();
 }
 
-fn build_targets(config_json: scheduler::SchedulerConfig) -> Option<Instant> {
+fn build_targets(config_json: scheduler::SchedulerConfig, last_build_at: Option<Instant>) -> Option<Instant> {
     // Run build_script in background thread (non-blocking)
     let now = Instant::now();
     let scheduler_name = config_json.scheduler_name.clone();
     let build_script = config_json.build_script.clone();
+
+    if last_build_at.is_some() && now.duration_since(last_build_at.unwrap()) < Duration::from_secs(600) {
+        info!("Build script already ran recently, skipping");
+        return last_build_at;
+    }
 
     // Spawn non-blocking build in background thread
     thread::spawn(move || {
@@ -527,7 +532,7 @@ fn create_scheduler(
             .map(PathBuf::from)
             .collect(),
     };
-    let last_build_at = build_targets(config_json.clone());
+    let last_build_at = build_targets(config_json.clone(), None);
     let scheduler = Scheduler::new(
         collector,
         config_json.clone(),
