@@ -46,6 +46,31 @@ pub struct CrashInfo {
     pub created_at: NaiveDateTime,
 }
 
+// Cache structures for display data (to avoid blocking during updates)
+#[derive(Debug, Clone)]
+struct ProcessDisplayInfo {
+    name: String,
+    status: ProcessStatus,
+    started_at: Instant,
+    info: String,
+}
+
+#[derive(Debug, Clone)]
+struct SchedulerDisplayInfo {
+    name: String,
+    status: ProcessStatus,
+    started_at: Instant,
+    info: String,
+    last_build_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone)]
+struct LauncherDisplayCache {
+    procs: Vec<ProcessDisplayInfo>,
+    config_status: String,
+    schedulers: Vec<SchedulerDisplayInfo>,
+}
+
 impl TabsState {
     pub fn new(titles: Vec<String>) -> Self {
         Self { titles, index: 0 }
@@ -91,6 +116,7 @@ pub struct App {
     pending_update: bool,
     status_update_sender: Option<mpsc::Sender<()>>,
     status_update_receiver: Option<mpsc::Receiver<()>>,
+    launcher_cache: LauncherDisplayCache,
 }
 
 impl App {
@@ -138,7 +164,7 @@ impl App {
 
         let mut app = Self {
             tabs: TabsState::new(vec![]),
-            launcher,
+            launcher: launcher.clone(),
             exit: false,
             tasks_info: Vec::new(),
             crashes: Vec::new(),
@@ -149,7 +175,14 @@ impl App {
             pending_update: false,
             status_update_sender: Some(status_update_sender),
             status_update_receiver: Some(status_update_receiver),
+            launcher_cache: LauncherDisplayCache {
+                procs: Vec::new(),
+                config_status: String::new(),
+                schedulers: Vec::new(),
+            },
         };
+        // Initialize cache from launcher
+        app.update_launcher_cache();
         app.sync_tabs_with_schedulers();
         app.update_tasks_info();
         // Initial synchronous update
@@ -212,9 +245,45 @@ impl App {
             Ok((Vec::new(), last_crashes_date))
         }
     }
+    fn update_launcher_cache(&mut self) {
+        // Try to update cache from launcher (non-blocking)
+        if let Ok(launcher) = self.launcher.try_read() {
+            // Update processes cache
+            self.launcher_cache.procs = launcher
+                .procs
+                .iter()
+                .map(|p| ProcessDisplayInfo {
+                    name: p.name.clone(),
+                    status: p.status,
+                    started_at: p.started_at,
+                    info: p.info.clone(),
+                })
+                .collect();
+
+            // Update config status
+            self.launcher_cache.config_status = launcher.config_status.clone();
+
+            // Update schedulers cache
+            self.launcher_cache.schedulers = launcher
+                .scheduler_processes
+                .iter()
+                .map(|s| SchedulerDisplayInfo {
+                    name: s.name.clone(),
+                    status: s.status,
+                    started_at: s.started_at,
+                    info: s.info.clone(),
+                    last_build_at: s.last_build_at,
+                })
+                .collect();
+        }
+        // If try_read() fails, we keep the previous cache (no update)
+    }
+
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         terminal.clear()?;
         while !self.exit {
+            // Update cache from launcher (non-blocking, keeps old data if locked)
+            self.update_launcher_cache();
             self.sync_tabs_with_schedulers();
             self.update_tasks_info();
 
@@ -527,105 +596,105 @@ impl Widget for &App {
             .title_bottom(instructions.centered())
             .border_set(border::THICK);
 
-        if let Ok(launcher) = self.launcher.try_read() {
-            // Check if we're on the Processes tab (index 0)
-            if self.tabs.index == 0 {
-                // Display processes information
-                let mut lines = vec![
-                    Line::from("Launcher Processes:".bold()),
-                    Line::from(""), // Empty line separator
-                ];
+        // Always use cache for display (never blocks, always shows last available data)
+        // Check if we're on the Processes tab (index 0)
+        if self.tabs.index == 0 {
+            // Display processes information
+            let mut lines = vec![
+                Line::from("Launcher Processes:".bold()),
+                Line::from(""), // Empty line separator
+            ];
 
-                if launcher.procs.is_empty() {
-                    lines.push(Line::from("  No processes running".dim()));
-                } else {
-                    for proc in &launcher.procs {
-                        let status_text = match proc.status {
-                            ProcessStatus::Running => "Running".green(),
-                            ProcessStatus::Stopped => "Stopped".red(),
-                        };
-                        let uptime_td =
-                            TimeDelta::new(proc.started_at.elapsed().as_secs() as i64, 0)
+            if self.launcher_cache.procs.is_empty() {
+                lines.push(Line::from("  No processes running".dim()));
+            } else {
+                for proc in &self.launcher_cache.procs {
+                    let status_text = match proc.status {
+                        ProcessStatus::Running => "Running".green(),
+                        ProcessStatus::Stopped => "Stopped".red(),
+                    };
+                    let uptime_td =
+                        TimeDelta::new(proc.started_at.elapsed().as_secs() as i64, 0)
+                            .expect("Failed to create TimeDelta")
+                            .to_std()
+                            .unwrap();
+                    let uptime_str = format_duration(uptime_td).to_string();
+                    lines.push(Line::from(vec![
+                        "  • ".into(),
+                        proc.name.clone().yellow().bold(),
+                        " - ".into(),
+                        status_text,
+                        " - ".into(),
+                        format!("Uptime: {}", uptime_str).cyan(),
+                    ]));
+                    lines.push(Line::from(vec![
+                        "    Info: ".into(),
+                        proc.info.clone().dim(),
+                    ]));
+                }
+            }
+
+            lines.push(Line::from("")); // Empty line separator
+            lines.push(Line::from(vec![
+                "Config Status".bold(),
+                " - ".into(),
+                self.launcher_cache.config_status.clone().yellow(),
+            ]));
+
+            // Add schedulers section
+            lines.push(Line::from("")); // Empty line separator
+            lines.push(Line::from("Schedulers:".bold()));
+            lines.push(Line::from("")); // Empty line separator
+
+            if self.launcher_cache.schedulers.is_empty() {
+                lines.push(Line::from("  No schedulers running".dim()));
+            } else {
+                for scheduler in &self.launcher_cache.schedulers {
+                    let status_text = match scheduler.status {
+                        ProcessStatus::Running => "Running".green(),
+                        ProcessStatus::Stopped => "Stopped".red(),
+                    };
+                    let uptime =
+                        TimeDelta::new(scheduler.started_at.elapsed().as_secs() as i64, 0)
+                            .expect("Failed to create TimeDelta")
+                            .to_std()
+                            .unwrap();
+
+                    let uptime_str = match scheduler.status {
+                        ProcessStatus::Running => format_duration(uptime).to_string().white(),
+                        ProcessStatus::Stopped => "N/A".red(),
+                    };
+
+                    lines.push(Line::from(vec![
+                        "  • ".into(),
+                        scheduler.name.clone().yellow().bold(),
+                        " - ".into(),
+                        status_text,
+                        " - ".into(),
+                        format!("Uptime: {}", uptime_str).cyan(),
+                    ]));
+                    lines.push(Line::from(vec![
+                        "    Info: ".into(),
+                        scheduler.info.clone().dim(),
+                    ]));
+
+                    let build_tds = if let Some(last_build_at) = scheduler.last_build_at {
+                        let build_td =
+                            TimeDelta::new(last_build_at.elapsed().as_secs() as i64, 0)
                                 .expect("Failed to create TimeDelta")
                                 .to_std()
                                 .unwrap();
-                        let uptime_str = format_duration(uptime_td).to_string();
-                        lines.push(Line::from(vec![
-                            "  • ".into(),
-                            proc.name.clone().yellow().bold(),
-                            " - ".into(),
-                            status_text,
-                            " - ".into(),
-                            format!("Uptime: {}", uptime_str).cyan(),
-                        ]));
-                        lines.push(Line::from(vec![
-                            "    Info: ".into(),
-                            proc.info.clone().dim(),
-                        ]));
-                    }
+                        format_duration(build_td).to_string()
+                    } else {
+                        "Never build".to_string()
+                    };
+
+                    lines.push(Line::from(vec![
+                        "    Last Build: ".into(),
+                        format!("{} ago", build_tds).cyan(),
+                    ]));
                 }
-
-                lines.push(Line::from("")); // Empty line separator
-                lines.push(Line::from(vec![
-                    "Config Status".bold(),
-                    " - ".into(),
-                    launcher.config_status.clone().yellow(),
-                ]));
-
-                // Add schedulers section
-                lines.push(Line::from("")); // Empty line separator
-                lines.push(Line::from("Schedulers:".bold()));
-                lines.push(Line::from("")); // Empty line separator
-
-                if launcher.scheduler_processes.is_empty() {
-                    lines.push(Line::from("  No schedulers running".dim()));
-                } else {
-                    for scheduler in &launcher.scheduler_processes {
-                        let status_text = match scheduler.status {
-                            ProcessStatus::Running => "Running".green(),
-                            ProcessStatus::Stopped => "Stopped".red(),
-                        };
-                        let uptime =
-                            TimeDelta::new(scheduler.started_at.elapsed().as_secs() as i64, 0)
-                                .expect("Failed to create TimeDelta")
-                                .to_std()
-                                .unwrap();
-
-                        let uptime_str = match scheduler.status {
-                            ProcessStatus::Running => format_duration(uptime).to_string().white(),
-                            ProcessStatus::Stopped => "N/A".red(),
-                        };
-
-                        lines.push(Line::from(vec![
-                            "  • ".into(),
-                            scheduler.name.clone().yellow().bold(),
-                            " - ".into(),
-                            status_text,
-                            " - ".into(),
-                            format!("Uptime: {}", uptime_str).cyan(),
-                        ]));
-                        lines.push(Line::from(vec![
-                            "    Info: ".into(),
-                            scheduler.info.clone().dim(),
-                        ]));
-
-                        let build_tds = if let Some(last_build_at) = scheduler.last_build_at {
-                            let build_td =
-                                TimeDelta::new(last_build_at.elapsed().as_secs() as i64, 0)
-                                    .expect("Failed to create TimeDelta")
-                                    .to_std()
-                                    .unwrap();
-                            format_duration(build_td).to_string()
-                        } else {
-                            "Never build".to_string()
-                        };
-
-                        lines.push(Line::from(vec![
-                            "    Last Build: ".into(),
-                            format!("{} ago", build_tds).cyan(),
-                        ]));
-                    }
-                }
+            }
 
                 // Add recent crashes section
                 lines.push(Line::from("")); // Empty line separator
@@ -660,8 +729,8 @@ impl Widget for &App {
             } else {
                 // Display scheduler information (index > 0)
                 let scheduler_index = self.tabs.index - 1; // Adjust for "Processes" tab at index 0
-                if scheduler_index < launcher.scheduler_processes.len() {
-                    let selected_scheduler = &launcher.scheduler_processes[scheduler_index];
+                if scheduler_index < self.launcher_cache.schedulers.len() {
+                    let selected_scheduler = &self.launcher_cache.schedulers[scheduler_index];
 
                     // Build the text content
                     let mut lines = vec![
@@ -715,10 +784,6 @@ impl Widget for &App {
                     Paragraph::new(text).block(block).render(content_area, buf);
                 }
             }
-        } else {
-            let text = Text::from("No launcher available");
-            Paragraph::new(text).block(block).render(content_area, buf);
-        }
     }
 }
 
