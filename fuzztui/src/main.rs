@@ -1,4 +1,4 @@
-use chrono::{NaiveDateTime, TimeDelta};
+use chrono::{NaiveDateTime, TimeDelta, Local};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use std::io;
 use std::path::PathBuf;
@@ -186,7 +186,6 @@ impl App {
         app.sync_tabs_with_schedulers();
         app.update_tasks_info();
         // Initial synchronous update
-        app.update_crashes();
         app
     }
 
@@ -202,7 +201,14 @@ impl App {
                 &most_recent_date.format("%Y-%m-%d %H:%M:%S%.f").to_string(),
             );
         }
-
+        else {
+            let now = Local::now().naive_local();
+            url.query_pairs_mut().append_pair(
+                "after",
+                &now.format("%Y-%m-%d %H:%M:%S%.f").to_string(),
+            );
+            info!("now: {}", now.format("%Y-%m-%d %H:%M:%S%.f").to_string());
+        }
         let response = client.get(url.as_str()).send().map_err(|_| ())?;
 
         if response.status().is_success() {
@@ -443,91 +449,6 @@ impl App {
             } else {
                 // Clear tasks info when on Processes tab
                 self.tasks_info.clear();
-            }
-        }
-    }
-
-    fn update_crashes(&mut self) {
-        let client = reqwest::blocking::Client::new();
-
-        // Build the URL - use last_crashes_date if available
-        let mut url = Url::parse("http://127.0.0.1:3000/crashes").unwrap();
-
-        if let Some(ref most_recent_date) = self.last_crashes_date {
-            // Only get crashes newer than the last date we checked
-            // The backend expects format: "%Y-%m-%d %H:%M:%S%.f"
-            url.query_pairs_mut().append_pair(
-                "after",
-                &most_recent_date.format("%Y-%m-%d %H:%M:%S%.f").to_string(),
-            );
-        }
-        info!("Url to collect crashes: {}", url.as_str());
-        // If last_crashes_date is None, we'll get all crashes (but only keep the 10 most recent)
-
-        match client.get(url.as_str()).send() {
-            Ok(response) => {
-                if response.status().is_success() {
-                    match response.json::<Vec<serde_json::Value>>() {
-                        Ok(crashes_json) => {
-                            // Parse new crashes
-                            let mut new_crashes: Vec<CrashInfo> = crashes_json
-                                .into_iter()
-                                .filter_map(|crash| {
-                                    let id = crash.get("id")?.as_i64()? as i32;
-                                    let filename = crash.get("filename")?.as_str()?.to_string();
-                                    let scheduler_name =
-                                        crash.get("scheduler_name")?.as_str()?.to_string();
-
-                                    // Parse created_at - it might be a string or an object
-                                    let created_at =
-                                        if let Some(date_str) = crash.get("created_at")?.as_str() {
-                                            date_str.to_string()
-                                        } else {
-                                            // Try to format from timestamp object
-                                            format!("{:?}", crash.get("created_at"))
-                                        };
-                                    info!("created_at: {}", created_at);
-
-                                    Some(CrashInfo {
-                                        id,
-                                        filename,
-                                        scheduler_name,
-                                        created_at: NaiveDateTime::parse_from_str(
-                                            &created_at,
-                                            "%Y-%m-%dT%H:%M:%S%.f",
-                                        )
-                                        .unwrap(),
-                                    })
-                                })
-                                .collect();
-
-                            if !new_crashes.is_empty() {
-                                // Sort by created_at (most recent first)
-                                new_crashes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-
-                                // Add new crashes to existing ones
-                                self.crashes.append(&mut new_crashes);
-
-                                // Sort all crashes and keep only the 10 most recent
-                                self.crashes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-                                self.crashes.truncate(10);
-
-                                // Update last_crashes_date to the most recent crash date
-                                if let Some(most_recent) = self.crashes.first() {
-                                    self.last_crashes_date = Some(most_recent.created_at);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            // Failed to parse JSON, keep existing crashes
-                            error!("Failed to parse crashes JSON: {:?}", e);
-                        }
-                    }
-                }
-            }
-            Err(_) => {
-                // Failed to connect to backend, keep existing crashes
-                // Don't print error on every update to avoid spam
             }
         }
     }
