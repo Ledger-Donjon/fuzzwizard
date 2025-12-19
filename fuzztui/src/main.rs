@@ -2,7 +2,7 @@ use chrono::{NaiveDateTime, TimeDelta};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use std::io;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 mod launcher;
@@ -78,9 +78,9 @@ struct UpdateMessage {
 }
 
 #[derive(Debug)]
-pub struct App<'a> {
+pub struct App {
     tabs: TabsState,
-    launcher: Option<&'a mut Launcher>,
+    launcher: Arc<Mutex<Launcher>>,
     exit: bool,
     tasks_info: Vec<TaskInfo>,
     crashes: Vec<CrashInfo>,
@@ -89,13 +89,18 @@ pub struct App<'a> {
     update_sender: Option<mpsc::Sender<Option<NaiveDateTime>>>,
     update_receiver: Option<mpsc::Receiver<UpdateMessage>>,
     pending_update: bool,
+    status_update_sender: Option<mpsc::Sender<()>>,
+    status_update_receiver: Option<mpsc::Receiver<()>>,
 }
 
-impl<'a> App<'a> {
-    pub fn default(launcher: &'a mut Launcher, initial_date: Option<NaiveDateTime>) -> Self {
+impl App {
+    pub fn default(launcher: Arc<Mutex<Launcher>>, initial_date: Option<NaiveDateTime>) -> Self {
         // Create channels for async crash updates
         let (update_sender, update_receiver_main) = mpsc::channel();
         let (update_sender_main, update_receiver) = mpsc::channel();
+
+        // Create channel for launcher status update completion
+        let (status_update_sender, status_update_receiver) = mpsc::channel();
 
         // Spawn background thread for crash updates only
         thread::spawn(move || {
@@ -133,7 +138,7 @@ impl<'a> App<'a> {
 
         let mut app = Self {
             tabs: TabsState::new(vec![]),
-            launcher: Some(launcher),
+            launcher,
             exit: false,
             tasks_info: Vec::new(),
             crashes: Vec::new(),
@@ -142,6 +147,8 @@ impl<'a> App<'a> {
             update_sender: Some(update_sender),
             update_receiver: Some(update_receiver),
             pending_update: false,
+            status_update_sender: Some(status_update_sender),
+            status_update_receiver: Some(status_update_receiver),
         };
         app.sync_tabs_with_schedulers();
         app.update_tasks_info();
@@ -226,18 +233,28 @@ impl<'a> App<'a> {
                 }
             }
 
+            // Check for launcher status update completion (non-blocking)
+            if let Some(ref receiver) = self.status_update_receiver {
+                while receiver.try_recv().is_ok(){
+                    self.pending_update = false;
+                }
+            }
+
             // Update proc status (fast, non-blocking)
             {
                 if self.tabs.index == 0 {
-                    self.launcher.as_mut().unwrap().update_proc_status();
+                    if let Ok(mut launcher) = self.launcher.try_lock() {
+                        launcher.update_proc_status();
+                    }
                 }
 
                 let now = Instant::now();
                 let mut should_update = false;
 
-                match self.last_update {
+                match &self.last_update {
+
                     Some(last) => {
-                        if now.duration_since(last) >= Duration::from_secs(60) {
+                        if now.duration_since(*last) >= Duration::from_secs(60) {
                             should_update = true;
                             self.last_update = Some(now);
                         }
@@ -255,9 +272,18 @@ impl<'a> App<'a> {
                         self.pending_update = true;
                     }
 
-                    // Update launcher status (can be slow, but we do it here)
-                    // This could also be made async if needed, but it's less critical
-                    self.launcher.as_mut().unwrap().update_status();
+                    // Update launcher status asynchronously using a background thread
+                    // Thread-safe: We use Arc<Mutex<Launcher>> which is Send and Sync
+                    let launcher_clone = Arc::clone(&self.launcher);
+                    if let Some(ref sender) = self.status_update_sender {
+                        let sender_clone = sender.clone();
+                        thread::spawn(move || {
+                            if let Ok(mut launcher) = launcher_clone.lock() {
+                                launcher.update_status();
+                            }
+                            let _ = sender_clone.send(());
+                        });
+                    }
                 }
             }
 
@@ -296,7 +322,7 @@ impl<'a> App<'a> {
         }
     }
     fn sync_tabs_with_schedulers(&mut self) {
-        if let Some(launcher) = &self.launcher {
+        if let Ok(launcher) = self.launcher.try_lock() {
             // Start with "Processes" tab at index 0
             let mut new_titles = vec!["Processes".to_string()];
 
@@ -323,7 +349,7 @@ impl<'a> App<'a> {
     }
 
     fn update_tasks_info(&mut self) {
-        if let Some(launcher) = &mut self.launcher {
+        if let Ok(mut launcher) = self.launcher.try_lock() {
             // Only update tasks info if we're on a scheduler tab (index > 0)
             if self.tabs.index > 0 {
                 let scheduler_index = self.tabs.index - 1; // Adjust for "Processes" tab at index 0
@@ -444,14 +470,14 @@ impl<'a> App<'a> {
     }
     */
     fn exit(&mut self) {
-        if let Some(launcher) = &mut self.launcher {
+        if let Ok(mut launcher) = self.launcher.lock() {
             launcher.shutdown();
         }
         self.exit = true;
     }
 }
 
-impl<'a> Widget for &App<'a> {
+impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
         // Split the area into tabs section and content section
         let vertical = Layout::default()
@@ -498,7 +524,7 @@ impl<'a> Widget for &App<'a> {
             .title_bottom(instructions.centered())
             .border_set(border::THICK);
 
-        if let Some(launcher) = &self.launcher {
+        if let Ok(launcher) = self.launcher.try_lock() {
             // Check if we're on the Processes tab (index 0)
             if self.tabs.index == 0 {
                 // Display processes information
@@ -742,7 +768,10 @@ fn main() -> io::Result<()> {
     let mut launcher = Launcher::new(slack_token, slack_channel, config_path, config_json);
     launcher.init();
 
-    let app_result = App::default(&mut launcher, None).run(&mut terminal);
+    // Wrap launcher in Arc<Mutex<>> for thread-safe access
+    let launcher = Arc::new(Mutex::new(launcher));
+
+    let app_result = App::default(launcher, None).run(&mut terminal);
 
     ratatui::restore();
     app_result
