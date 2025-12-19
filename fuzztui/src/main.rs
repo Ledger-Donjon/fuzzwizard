@@ -2,7 +2,7 @@ use chrono::{NaiveDateTime, TimeDelta};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use std::io;
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 mod launcher;
@@ -80,7 +80,7 @@ struct UpdateMessage {
 #[derive(Debug)]
 pub struct App {
     tabs: TabsState,
-    launcher: Arc<Mutex<Launcher>>,
+    launcher: Arc<RwLock<Launcher>>,
     exit: bool,
     tasks_info: Vec<TaskInfo>,
     crashes: Vec<CrashInfo>,
@@ -94,7 +94,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn default(launcher: Arc<Mutex<Launcher>>, initial_date: Option<NaiveDateTime>) -> Self {
+    pub fn default(launcher: Arc<RwLock<Launcher>>, initial_date: Option<NaiveDateTime>) -> Self {
         // Create channels for async crash updates
         let (update_sender, update_receiver_main) = mpsc::channel();
         let (update_sender_main, update_receiver) = mpsc::channel();
@@ -243,7 +243,7 @@ impl App {
             // Update proc status (fast, non-blocking)
             {
                 if self.tabs.index == 0 {
-                    if let Ok(mut launcher) = self.launcher.try_lock() {
+                    if let Ok(mut launcher) = self.launcher.try_write() {
                         launcher.update_proc_status();
                     }
                 }
@@ -273,12 +273,13 @@ impl App {
                     }
 
                     // Update launcher status asynchronously using a background thread
-                    // Thread-safe: We use Arc<Mutex<Launcher>> which is Send and Sync
+                    // Thread-safe: We use Arc<RwLock<Launcher>> which is Send and Sync
+                    // RwLock allows multiple readers (for display) while one writer (for update)
                     let launcher_clone = Arc::clone(&self.launcher);
                     if let Some(ref sender) = self.status_update_sender {
                         let sender_clone = sender.clone();
                         thread::spawn(move || {
-                            if let Ok(mut launcher) = launcher_clone.lock() {
+                            if let Ok(mut launcher) = launcher_clone.write() {
                                 launcher.update_status();
                             }
                             let _ = sender_clone.send(());
@@ -322,7 +323,7 @@ impl App {
         }
     }
     fn sync_tabs_with_schedulers(&mut self) {
-        if let Ok(launcher) = self.launcher.try_lock() {
+        if let Ok(launcher) = self.launcher.try_read() {
             // Start with "Processes" tab at index 0
             let mut new_titles = vec!["Processes".to_string()];
 
@@ -349,7 +350,9 @@ impl App {
     }
 
     fn update_tasks_info(&mut self) {
-        if let Ok(mut launcher) = self.launcher.try_lock() {
+        // Use try_write() because get_tasks_with_status() requires &mut
+        // If update_status() is running, we'll keep the previous tasks_info
+        if let Ok(mut launcher) = self.launcher.try_write() {
             // Only update tasks info if we're on a scheduler tab (index > 0)
             if self.tabs.index > 0 {
                 let scheduler_index = self.tabs.index - 1; // Adjust for "Processes" tab at index 0
@@ -470,7 +473,7 @@ impl App {
     }
     */
     fn exit(&mut self) {
-        if let Ok(mut launcher) = self.launcher.lock() {
+        if let Ok(mut launcher) = self.launcher.write() {
             launcher.shutdown();
         }
         self.exit = true;
@@ -524,7 +527,7 @@ impl Widget for &App {
             .title_bottom(instructions.centered())
             .border_set(border::THICK);
 
-        if let Ok(launcher) = self.launcher.try_lock() {
+        if let Ok(launcher) = self.launcher.try_read() {
             // Check if we're on the Processes tab (index 0)
             if self.tabs.index == 0 {
                 // Display processes information
@@ -768,8 +771,9 @@ fn main() -> io::Result<()> {
     let mut launcher = Launcher::new(slack_token, slack_channel, config_path, config_json);
     launcher.init();
 
-    // Wrap launcher in Arc<Mutex<>> for thread-safe access
-    let launcher = Arc::new(Mutex::new(launcher));
+    // Wrap launcher in Arc<RwLock<>> for thread-safe access
+    // RwLock allows multiple readers (for display) while one writer (for update)
+    let launcher = Arc::new(RwLock::new(launcher));
 
     let app_result = App::default(launcher, None).run(&mut terminal);
 
