@@ -462,13 +462,18 @@ fn send_slack_alert(token: &str, channel: &str, text: &str, should_send: bool) {
         .send();
 }
 
-fn build_targets(config_json: scheduler::SchedulerConfig, last_build_at: Option<Instant>) -> Option<Instant> {
+fn build_targets(
+    config_json: scheduler::SchedulerConfig,
+    last_build_at: Option<Instant>,
+) -> Option<Instant> {
     // Run build_script in background thread (non-blocking)
     let now = Instant::now();
     let scheduler_name = config_json.scheduler_name.clone();
     let build_script = config_json.build_script.clone();
 
-    if last_build_at.is_some() && now.duration_since(last_build_at.unwrap()) < Duration::from_secs(600) {
+    if last_build_at.is_some()
+        && now.duration_since(last_build_at.unwrap()) < Duration::from_secs(600)
+    {
         info!("Build script already ran recently, skipping");
         return last_build_at;
     }

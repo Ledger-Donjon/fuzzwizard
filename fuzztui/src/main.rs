@@ -1,15 +1,15 @@
-use chrono::{NaiveDateTime, TimeDelta, Local};
+use chrono::{Local, NaiveDateTime, TimeDelta};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use std::io;
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, RwLock};
+use std::sync::{Arc, RwLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 mod launcher;
 use ftail::Ftail;
 use humantime::format_duration;
 use launcher::{Launcher, ProcessStatus, require_env};
-use log::{LevelFilter, error, info};
+use log::{LevelFilter, info};
 use ratatui::{
     DefaultTerminal, Frame,
     buffer::Buffer,
@@ -194,25 +194,28 @@ impl App {
     ) -> Result<(Vec<CrashInfo>, Option<NaiveDateTime>), ()> {
         let client = reqwest::blocking::Client::new();
         let mut url = Url::parse("http://127.0.0.1:3000/crashes").map_err(|_| ())?;
+        let mut new_date = Local::now().naive_local();
 
         if let Some(ref most_recent_date) = last_crashes_date {
             url.query_pairs_mut().append_pair(
                 "after",
                 &most_recent_date.format("%Y-%m-%d %H:%M:%S%.f").to_string(),
             );
-        }
-        else {
-            let now = Local::now().naive_local();
+        } else {
             url.query_pairs_mut().append_pair(
                 "after",
-                &now.format("%Y-%m-%d %H:%M:%S%.f").to_string(),
+                &new_date.format("%Y-%m-%d %H:%M:%S%.f").to_string(),
             );
-            info!("now: {}", now.format("%Y-%m-%d %H:%M:%S%.f").to_string());
+            info!("now: {}", new_date.format("%Y-%m-%d %H:%M:%S%.f"));
         }
         let response = client.get(url.as_str()).send().map_err(|_| ())?;
 
         if response.status().is_success() {
             let crashes_json: Vec<serde_json::Value> = response.json().map_err(|_| ())?;
+            if crashes_json.is_empty() {
+                info!("no crashes found");
+                return Ok((Vec::new(), Some(new_date)));
+            }
 
             let mut new_crashes: Vec<CrashInfo> = crashes_json
                 .into_iter()
@@ -242,15 +245,16 @@ impl App {
 
             if !new_crashes.is_empty() {
                 new_crashes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-                let last_date = new_crashes.first().map(|c| c.created_at);
-                Ok((new_crashes, last_date))
+                new_date = new_crashes.first().map(|c| c.created_at).unwrap();
+                Ok((new_crashes, Some(new_date)))
             } else {
-                Ok((Vec::new(), last_crashes_date))
+                Ok((Vec::new(), Some(new_date)))
             }
         } else {
-            Ok((Vec::new(), last_crashes_date))
+            Ok((Vec::new(), Some(new_date)))
         }
     }
+
     fn update_launcher_cache(&mut self) {
         // Try to update cache from launcher (non-blocking)
         if let Ok(launcher) = self.launcher.try_read() {
@@ -310,7 +314,7 @@ impl App {
 
             // Check for launcher status update completion (non-blocking)
             if let Some(ref receiver) = self.status_update_receiver {
-                while receiver.try_recv().is_ok(){
+                while receiver.try_recv().is_ok() {
                     self.pending_update = false;
                 }
             }
@@ -327,7 +331,6 @@ impl App {
                 let mut should_update = false;
 
                 match &self.last_update {
-
                     Some(last) => {
                         if now.duration_since(*last) >= Duration::from_secs(60) {
                             should_update = true;
@@ -534,11 +537,10 @@ impl Widget for &App {
                         ProcessStatus::Running => "Running".green(),
                         ProcessStatus::Stopped => "Stopped".red(),
                     };
-                    let uptime_td =
-                        TimeDelta::new(proc.started_at.elapsed().as_secs() as i64, 0)
-                            .expect("Failed to create TimeDelta")
-                            .to_std()
-                            .unwrap();
+                    let uptime_td = TimeDelta::new(proc.started_at.elapsed().as_secs() as i64, 0)
+                        .expect("Failed to create TimeDelta")
+                        .to_std()
+                        .unwrap();
                     let uptime_str = format_duration(uptime_td).to_string();
                     lines.push(Line::from(vec![
                         "  • ".into(),
@@ -575,11 +577,10 @@ impl Widget for &App {
                         ProcessStatus::Running => "Running".green(),
                         ProcessStatus::Stopped => "Stopped".red(),
                     };
-                    let uptime =
-                        TimeDelta::new(scheduler.started_at.elapsed().as_secs() as i64, 0)
-                            .expect("Failed to create TimeDelta")
-                            .to_std()
-                            .unwrap();
+                    let uptime = TimeDelta::new(scheduler.started_at.elapsed().as_secs() as i64, 0)
+                        .expect("Failed to create TimeDelta")
+                        .to_std()
+                        .unwrap();
 
                     let uptime_str = match scheduler.status {
                         ProcessStatus::Running => format_duration(uptime).to_string().white(),
@@ -600,11 +601,10 @@ impl Widget for &App {
                     ]));
 
                     let build_tds = if let Some(last_build_at) = scheduler.last_build_at {
-                        let build_td =
-                            TimeDelta::new(last_build_at.elapsed().as_secs() as i64, 0)
-                                .expect("Failed to create TimeDelta")
-                                .to_std()
-                                .unwrap();
+                        let build_td = TimeDelta::new(last_build_at.elapsed().as_secs() as i64, 0)
+                            .expect("Failed to create TimeDelta")
+                            .to_std()
+                            .unwrap();
                         format_duration(build_td).to_string()
                     } else {
                         "Never build".to_string()
@@ -617,30 +617,83 @@ impl Widget for &App {
                 }
             }
 
-                // Add recent crashes section
-                lines.push(Line::from("")); // Empty line separator
-                lines.push(Line::from("Recent Crashes (Last 10):".bold()));
-                lines.push(Line::from("")); // Empty line separator
+            // Add recent crashes section
+            lines.push(Line::from("")); // Empty line separator
+            lines.push(Line::from("Recent Crashes (Last 10):".bold()));
+            lines.push(Line::from("")); // Empty line separator
 
-                if self.crashes.is_empty() {
-                    lines.push(Line::from("  No crashes found".dim()));
+            if self.crashes.is_empty() {
+                lines.push(Line::from("  No crashes found".dim()));
+            } else {
+                for crash in &self.crashes {
+                    lines.push(Line::from(vec![
+                        "  • ".into(),
+                        format!("ID: {}", crash.id).cyan(),
+                        " - ".into(),
+                        crash.filename.clone().yellow(),
+                        " - ".into(),
+                        crash.scheduler_name.clone().green(),
+                    ]));
+                    lines.push(Line::from(vec![
+                        "    Date: ".into(),
+                        crash
+                            .created_at
+                            .format("%Y-%m-%d %H:%M:%S%.f")
+                            .to_string()
+                            .dim(),
+                    ]));
+                }
+            }
+
+            let text = Text::from(lines);
+            Paragraph::new(text).block(block).render(content_area, buf);
+        } else {
+            // Display scheduler information (index > 0)
+            let scheduler_index = self.tabs.index - 1; // Adjust for "Processes" tab at index 0
+            if scheduler_index < self.launcher_cache.schedulers.len() {
+                let selected_scheduler = &self.launcher_cache.schedulers[scheduler_index];
+
+                // Build the text content
+                let mut lines = vec![
+                    Line::from(vec![
+                        "Name: ".into(),
+                        selected_scheduler.name.clone().yellow().bold(),
+                    ]),
+                    Line::from(vec![
+                        "Status: ".into(),
+                        selected_scheduler.status.to_string().cyan(),
+                    ]),
+                    Line::from(vec![
+                        "Info: ".into(),
+                        selected_scheduler.info.clone().into(),
+                    ]),
+                    Line::from(""), // Empty line separator
+                    Line::from("Tasks:".bold()),
+                ];
+
+                // Add tasks information
+                if self.tasks_info.is_empty() {
+                    lines.push(Line::from("  No tasks running".dim()));
                 } else {
-                    for crash in &self.crashes {
+                    for task_info in &self.tasks_info {
+                        let status_text = match task_info.is_running {
+                            TaskStatus::Running => "Running".green(),
+                            TaskStatus::Crashed => "Crashed".red(),
+                            TaskStatus::Stopped => "Stopped".red(),
+                        };
                         lines.push(Line::from(vec![
                             "  • ".into(),
-                            format!("ID: {}", crash.id).cyan(),
+                            format!("0x{}", &task_info.sha_hex[..16]).cyan(), // Show first 16 chars
                             " - ".into(),
-                            crash.filename.clone().yellow(),
-                            " - ".into(),
-                            crash.scheduler_name.clone().green(),
-                        ]));
-                        lines.push(Line::from(vec![
-                            "    Date: ".into(),
-                            crash
-                                .created_at
-                                .format("%Y-%m-%d %H:%M:%S%.f")
+                            task_info
+                                .path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown")
                                 .to_string()
-                                .dim(),
+                                .into(),
+                            " - ".into(),
+                            status_text,
                         ]));
                     }
                 }
@@ -648,63 +701,10 @@ impl Widget for &App {
                 let text = Text::from(lines);
                 Paragraph::new(text).block(block).render(content_area, buf);
             } else {
-                // Display scheduler information (index > 0)
-                let scheduler_index = self.tabs.index - 1; // Adjust for "Processes" tab at index 0
-                if scheduler_index < self.launcher_cache.schedulers.len() {
-                    let selected_scheduler = &self.launcher_cache.schedulers[scheduler_index];
-
-                    // Build the text content
-                    let mut lines = vec![
-                        Line::from(vec![
-                            "Name: ".into(),
-                            selected_scheduler.name.clone().yellow().bold(),
-                        ]),
-                        Line::from(vec![
-                            "Status: ".into(),
-                            selected_scheduler.status.to_string().cyan(),
-                        ]),
-                        Line::from(vec![
-                            "Info: ".into(),
-                            selected_scheduler.info.clone().into(),
-                        ]),
-                        Line::from(""), // Empty line separator
-                        Line::from("Tasks:".bold()),
-                    ];
-
-                    // Add tasks information
-                    if self.tasks_info.is_empty() {
-                        lines.push(Line::from("  No tasks running".dim()));
-                    } else {
-                        for task_info in &self.tasks_info {
-                            let status_text = match task_info.is_running {
-                                TaskStatus::Running => "Running".green(),
-                                TaskStatus::Crashed => "Crashed".red(),
-                                TaskStatus::Stopped => "Stopped".red(),
-                            };
-                            lines.push(Line::from(vec![
-                                "  • ".into(),
-                                format!("0x{}", &task_info.sha_hex[..16]).cyan(), // Show first 16 chars
-                                " - ".into(),
-                                task_info
-                                    .path
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("unknown")
-                                    .to_string()
-                                    .into(),
-                                " - ".into(),
-                                status_text,
-                            ]));
-                        }
-                    }
-
-                    let text = Text::from(lines);
-                    Paragraph::new(text).block(block).render(content_area, buf);
-                } else {
-                    let text = Text::from("No schedulers available");
-                    Paragraph::new(text).block(block).render(content_area, buf);
-                }
+                let text = Text::from("No schedulers available");
+                Paragraph::new(text).block(block).render(content_area, buf);
             }
+        }
     }
 }
 
