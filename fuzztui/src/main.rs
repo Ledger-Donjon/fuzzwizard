@@ -9,7 +9,7 @@ mod launcher;
 use ftail::Ftail;
 use humantime::format_duration;
 use launcher::{Launcher, ProcessStatus, require_env};
-use log::{LevelFilter, info};
+use log::{LevelFilter, error, info};
 use ratatui::{
     DefaultTerminal, Frame,
     buffer::Buffer,
@@ -107,57 +107,72 @@ pub struct App {
     tabs: TabsState,
     launcher: Arc<RwLock<Launcher>>,
     exit: bool,
-    tasks_info: Vec<TaskInfo>,
+    tasks_cache: std::collections::HashMap<usize, Vec<TaskInfo>>, // Cache tasks per scheduler index
     crashes: Vec<CrashInfo>,
-    last_crashes_date: Option<NaiveDateTime>,
+    last_crashes_date: NaiveDateTime,
     last_update: Option<Instant>,
     update_sender: Option<mpsc::Sender<Option<NaiveDateTime>>>,
     update_receiver: Option<mpsc::Receiver<UpdateMessage>>,
     pending_update: bool,
-    status_update_sender: Option<mpsc::Sender<()>>,
-    status_update_receiver: Option<mpsc::Receiver<()>>,
+    launcher_update_sender: Option<mpsc::Sender<()>>, // Request launcher update
+    status_update_receiver: Option<mpsc::Receiver<()>>, // Notification of completion
     launcher_cache: LauncherDisplayCache,
 }
 
 impl App {
-    pub fn default(launcher: Arc<RwLock<Launcher>>, initial_date: Option<NaiveDateTime>) -> Self {
+    pub fn default(launcher: Arc<RwLock<Launcher>>) -> Self {
         // Create channels for async crash updates
         let (update_sender, update_receiver_main) = mpsc::channel();
         let (update_sender_main, update_receiver) = mpsc::channel();
 
-        // Create channel for launcher status update completion
+        // Create channels for launcher status updates
+        let (launcher_update_sender, launcher_update_receiver) = mpsc::channel();
         let (status_update_sender, status_update_receiver) = mpsc::channel();
 
-        // Spawn background thread for crash updates only
+        // Spawn background thread for crash updates
         thread::spawn(move || {
             loop {
                 // Wait for update request with last_crashes_date
-                match update_receiver_main.recv() {
-                    Ok(Some(last_date)) => {
-                        info!("Background thread: Updating crashes");
-                        let crashes_result = Self::update_crashes_async(Some(last_date));
-
-                        if let Ok((crashes, new_last_date)) = crashes_result {
-                            let _ = update_sender_main.send(UpdateMessage {
-                                crashes,
-                                last_crashes_date: new_last_date,
-                            });
-                        }
-                    }
-                    Ok(None) => {
-                        info!("Background thread: Updating crashes (initial)");
-                        let crashes_result = Self::update_crashes_async(None);
-
-                        if let Ok((crashes, last_date)) = crashes_result {
-                            let _ = update_sender_main.send(UpdateMessage {
-                                crashes,
-                                last_crashes_date: last_date,
-                            });
-                        }
-                    }
+                let date = match update_receiver_main.recv() {
+                    Ok(Some(last_date)) => last_date,
+                    Ok(None) => Local::now().naive_local(),
                     Err(_) => {
                         break; // Channel closed, exit thread
                     }
+                };
+
+                info!("Background thread: Updating crashes");
+                let crashes_result = Self::update_crashes_async(Some(date));
+
+                if let Ok((crashes, new_last_date)) = crashes_result {
+                    let _ = update_sender_main.send(UpdateMessage {
+                        crashes,
+                        last_crashes_date: new_last_date,
+                    });
+                }
+            }
+        });
+
+        // Spawn background thread for launcher status updates
+        let launcher_for_thread = launcher.clone();
+        let status_update_sender_for_thread = status_update_sender.clone();
+        thread::spawn(move || {
+            while launcher_update_receiver.recv().is_ok() {
+                info!("Background thread: Updating launcher status");
+                match launcher_for_thread.write() {
+                    Ok(mut launcher) => {
+                        launcher.update_status();
+                    }
+                    Err(e) => {
+                        error!("Error acquiring launcher write lock: {:?}", e);
+                    }
+                }
+                // Notify completion
+                if let Err(e) = status_update_sender_for_thread.send(()) {
+                    error!(
+                        "Error sending status update completion notification: {:?}",
+                        e
+                    );
                 }
             }
         });
@@ -166,14 +181,14 @@ impl App {
             tabs: TabsState::new(vec![]),
             launcher: launcher.clone(),
             exit: false,
-            tasks_info: Vec::new(),
+            tasks_cache: std::collections::HashMap::new(),
             crashes: Vec::new(),
-            last_crashes_date: initial_date,
+            last_crashes_date: Local::now().naive_local(),
             last_update: None,
             update_sender: Some(update_sender),
             update_receiver: Some(update_receiver),
             pending_update: false,
-            status_update_sender: Some(status_update_sender),
+            launcher_update_sender: Some(launcher_update_sender),
             status_update_receiver: Some(status_update_receiver),
             launcher_cache: LauncherDisplayCache {
                 procs: Vec::new(),
@@ -201,13 +216,8 @@ impl App {
                 "after",
                 &most_recent_date.format("%Y-%m-%d %H:%M:%S%.f").to_string(),
             );
-        } else {
-            url.query_pairs_mut().append_pair(
-                "after",
-                &new_date.format("%Y-%m-%d %H:%M:%S%.f").to_string(),
-            );
-            info!("now: {}", new_date.format("%Y-%m-%d %H:%M:%S%.f"));
         }
+        info!("url: {}", url.as_str());
         let response = client.get(url.as_str()).send().map_err(|_| ())?;
 
         if response.status().is_success() {
@@ -295,7 +305,7 @@ impl App {
             // Update cache from launcher (non-blocking, keeps old data if locked)
             self.update_launcher_cache();
             self.sync_tabs_with_schedulers();
-            self.update_tasks_info();
+            self.update_tasks_info(); // Update tasks for all schedulers
 
             // Check for crash updates from background thread (non-blocking)
             if let Some(ref receiver) = self.update_receiver {
@@ -306,7 +316,7 @@ impl App {
                     self.crashes.truncate(10);
 
                     if let Some(date) = update_msg.last_crashes_date {
-                        self.last_crashes_date = Some(date);
+                        self.last_crashes_date = date;
                     }
                     self.pending_update = false;
                 }
@@ -346,22 +356,14 @@ impl App {
                 if should_update && !self.pending_update {
                     // Trigger background crash update (non-blocking)
                     if let Some(ref sender) = self.update_sender {
-                        let _ = sender.send(self.last_crashes_date);
+                        let _ = sender.send(Some(self.last_crashes_date));
                         self.pending_update = true;
                     }
 
-                    // Update launcher status asynchronously using a background thread
-                    // Thread-safe: We use Arc<RwLock<Launcher>> which is Send and Sync
-                    // RwLock allows multiple readers (for display) while one writer (for update)
-                    let launcher_clone = Arc::clone(&self.launcher);
-                    if let Some(ref sender) = self.status_update_sender {
-                        let sender_clone = sender.clone();
-                        thread::spawn(move || {
-                            if let Ok(mut launcher) = launcher_clone.write() {
-                                launcher.update_status();
-                            }
-                            let _ = sender_clone.send(());
-                        });
+                    // Update launcher status asynchronously using background thread
+                    // Send request to permanent background thread (non-blocking)
+                    if let Some(ref sender) = self.launcher_update_sender {
+                        let _ = sender.send(());
                     }
                 }
             }
@@ -429,31 +431,26 @@ impl App {
 
     fn update_tasks_info(&mut self) {
         // Use try_write() because get_tasks_with_status() requires &mut
-        // If update_status() is running, we'll keep the previous tasks_info
+        // Update tasks for ALL schedulers, not just the current tab
+        // If update_status() is running, we'll keep the previous tasks in cache
         if let Ok(mut launcher) = self.launcher.try_write() {
-            // Only update tasks info if we're on a scheduler tab (index > 0)
-            if self.tabs.index > 0 {
-                let scheduler_index = self.tabs.index - 1; // Adjust for "Processes" tab at index 0
-                if scheduler_index < launcher.scheduler_processes.len() {
-                    let scheduler = &mut launcher.scheduler_processes[scheduler_index];
-                    let tasks_with_status = scheduler.scheduler.get_tasks_with_status();
-                    self.tasks_info = tasks_with_status
-                        .into_iter()
-                        .map(|(sha, path, is_running)| TaskInfo {
-                            sha,
-                            sha_hex: hex::encode(sha),
-                            path,
-                            is_running,
-                        })
-                        .collect();
-                } else {
-                    self.tasks_info.clear();
-                }
-            } else {
-                // Clear tasks info when on Processes tab
-                self.tasks_info.clear();
+            // Update tasks for all schedulers
+            for scheduler_index in 0..launcher.scheduler_processes.len() {
+                let scheduler = &mut launcher.scheduler_processes[scheduler_index];
+                let tasks_with_status = scheduler.scheduler.get_tasks_with_status();
+                let tasks: Vec<TaskInfo> = tasks_with_status
+                    .into_iter()
+                    .map(|(sha, path, is_running)| TaskInfo {
+                        sha,
+                        sha_hex: hex::encode(sha),
+                        path,
+                        is_running,
+                    })
+                    .collect();
+                self.tasks_cache.insert(scheduler_index, tasks);
             }
         }
+        // If lock unavailable, keep existing cache (no update)
     }
 
     /*
@@ -672,30 +669,34 @@ impl Widget for &App {
                 ];
 
                 // Add tasks information
-                if self.tasks_info.is_empty() {
-                    lines.push(Line::from("  No tasks running".dim()));
-                } else {
-                    for task_info in &self.tasks_info {
-                        let status_text = match task_info.is_running {
-                            TaskStatus::Running => "Running".green(),
-                            TaskStatus::Crashed => "Crashed".red(),
-                            TaskStatus::Stopped => "Stopped".red(),
-                        };
-                        lines.push(Line::from(vec![
-                            "  • ".into(),
-                            format!("0x{}", &task_info.sha_hex[..16]).cyan(), // Show first 16 chars
-                            " - ".into(),
-                            task_info
-                                .path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("unknown")
-                                .to_string()
-                                .into(),
-                            " - ".into(),
-                            status_text,
-                        ]));
+                if let Some(tasks) = self.tasks_cache.get(&scheduler_index) {
+                    if tasks.is_empty() {
+                        lines.push(Line::from("  No tasks running".dim()));
+                    } else {
+                        for task_info in tasks {
+                            let status_text = match task_info.is_running {
+                                TaskStatus::Running => "Running".green(),
+                                TaskStatus::Crashed => "Crashed".red(),
+                                TaskStatus::Stopped => "Stopped".red(),
+                            };
+                            lines.push(Line::from(vec![
+                                "  • ".into(),
+                                format!("0x{}", &task_info.sha_hex[..16]).cyan(), // Show first 16 chars
+                                " - ".into(),
+                                task_info
+                                    .path
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("unknown")
+                                    .to_string()
+                                    .into(),
+                                " - ".into(),
+                                status_text,
+                            ]));
+                        }
                     }
+                } else {
+                    lines.push(Line::from("  No tasks running".dim()));
                 }
 
                 let text = Text::from(lines);
@@ -748,10 +749,6 @@ fn main() -> io::Result<()> {
         .init()
         .expect("Failed to initialize logger");
 
-    // Initialize last_crashes_date with current date/time
-    // Format: "%Y-%m-%d %H:%M:%S%.f" (e.g., "2025-01-15 14:30:45.123")
-    //let initial_date = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.f").to_string();
-
     let mut terminal = ratatui::init();
 
     let mut launcher = Launcher::new(slack_token, slack_channel, config_path, config_json);
@@ -761,7 +758,7 @@ fn main() -> io::Result<()> {
     // RwLock allows multiple readers (for display) while one writer (for update)
     let launcher = Arc::new(RwLock::new(launcher));
 
-    let app_result = App::default(launcher, None).run(&mut terminal);
+    let app_result = App::default(launcher).run(&mut terminal);
 
     ratatui::restore();
     app_result

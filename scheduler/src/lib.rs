@@ -440,6 +440,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                     // Task is still running, keep it as Running
                 }
                 Ok(Some(_)) => {
+                    info!("CRASH - task has exited: {:?}", task.child.id());
                     // Task has exited - mark as crashed and report it
                     task.status = TaskStatus::Crashed;
 
@@ -503,9 +504,28 @@ impl<C: TargetsCollector> Scheduler<C> {
 
     /// Get tasks with their status (running or stopped)
     pub fn get_tasks_with_status(&mut self) -> Vec<(Sha, PathBuf, TaskStatus)> {
-        let mut result = Vec::new();
-        for (sha, task) in self.tasks.iter_mut() {
-            result.push((*sha, task.path.clone(), task.status));
+        let mut result: Vec<([u8; 32], PathBuf, TaskStatus)> = Vec::new();
+
+        for (hash, task) in self.tasks.iter_mut() {
+            // Only check tasks that are still running
+            if task.status != TaskStatus::Running {
+                result.push((*hash, task.path.clone(), task.status));
+                continue;
+            }
+            match task.child.try_wait() {
+                Ok(None) => {
+                    result.push((*hash, task.path.clone(), task.status));
+                    // Task is still running, keep it as Running
+                }
+                Ok(Some(_)) => {
+                    // Task has exited - mark as crashed and report it
+                    result.push((*hash, task.path.clone(), TaskStatus::Crashed));
+                }
+                Err(_) => {
+                    // Task is still running, keep it as Running
+                    result.push((*hash, task.path.clone(), task.status));
+                }
+            }
         }
         result
     }
