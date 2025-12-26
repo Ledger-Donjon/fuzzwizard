@@ -6,7 +6,6 @@ use sha3::{Digest, Sha3_256};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::thread;
 use std::time::{Duration, Instant};
 use std::{collections::HashMap, fmt, fs};
 
@@ -178,6 +177,23 @@ impl Launcher {
         // Reload config file if it changed, and update self.config_json
         self.update_proc_status();
 
+        // Update info string, targets, coverage, and crash report for each scheduler
+        for sched_proc in &mut self.scheduler_processes {
+            // Optionally: re-build targets if configuration changed (non-blocking)
+            // The build happens in background, we update last_build_at optimistically
+            let build_result = build_targets(sched_proc.config.clone(), sched_proc.last_build_at);
+            if let Some(build_time) = build_result {
+                sched_proc.last_build_at = Some(build_time);
+            }
+
+            let _update = sched_proc
+                .scheduler
+                .update(self.config_json.logdir.clone().as_str());
+            let _ = sched_proc.scheduler.report_crashes();
+
+            sched_proc.scheduler.collect_coverage();
+        }
+
         let config_file = match std::fs::read_to_string(&self.config_path) {
             Ok(contents) => contents,
             Err(e) => {
@@ -208,23 +224,6 @@ impl Launcher {
         self.config_json = config_json;
         self.config_status = String::from("Config loaded successfully");
         self.last_config_update = std::time::Instant::now();
-
-        // Update info string, targets, coverage, and crash report for each scheduler
-        for sched_proc in &mut self.scheduler_processes {
-            // Optionally: re-build targets if configuration changed (non-blocking)
-            // The build happens in background, we update last_build_at optimistically
-            let build_result = build_targets(sched_proc.config.clone(), sched_proc.last_build_at);
-            if let Some(build_time) = build_result {
-                sched_proc.last_build_at = Some(build_time);
-            }
-
-            let _update = sched_proc
-                .scheduler
-                .update(self.config_json.logdir.clone().as_str());
-            let _ = sched_proc.scheduler.report_crashes();
-
-            sched_proc.scheduler.collect_coverage();
-        }
 
         // Remove schedulers that are gone from config
         let scheduler_names_in_config: std::collections::HashSet<String> = self
@@ -484,32 +483,28 @@ fn build_targets(
         info!("Build script already ran recently, skipping");
         return last_build_at;
     }
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(&build_script)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .and_then(|mut child| child.wait());
 
-    // Spawn non-blocking build in background thread
-    thread::spawn(move || {
-        let status = Command::new("sh")
-            .arg("-c")
-            .arg(&build_script)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .and_then(|mut child| child.wait());
-
-        match status {
-            Ok(s) if s.success() => {
-                info!("build_script ran successfully for {}", scheduler_name);
-            }
-            Ok(s) => {
-                error!(
-                    "build_script exited with status: {} for {}",
-                    s, scheduler_name
-                );
-            }
-            Err(e) => {
-                error!("Failed to run build_script for {}: {}", scheduler_name, e);
-            }
+    match status {
+        Ok(s) if s.success() => {
+            info!("build_script ran successfully for {}", scheduler_name);
         }
-    });
+        Ok(s) => {
+            error!(
+                "build_script exited with status: {} for {}",
+                s, scheduler_name
+            );
+        }
+        Err(e) => {
+            error!("Failed to run build_script for {}: {}", scheduler_name, e);
+        }
+    }
 
     // Return immediately with current time, build happens in background
     Some(now)

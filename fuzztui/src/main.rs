@@ -318,7 +318,6 @@ impl App {
                     if let Some(date) = update_msg.last_crashes_date {
                         self.last_crashes_date = date;
                     }
-                    self.pending_update = false;
                 }
             }
 
