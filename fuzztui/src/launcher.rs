@@ -127,14 +127,21 @@ impl Launcher {
                 self.config_json.container_binary.clone(),
             );
 
-            self.scheduler_processes.push(SchedulerProcess::new(
+            let mut sched_proc = SchedulerProcess::new(
                 scheduler.name.clone(),
                 PathBuf::from(scheduler_config_path),
                 Instant::now(),
                 scheduler_started,
                 config,
                 last_build_at,
-            ));
+            );
+
+            let _update = sched_proc
+                .scheduler
+                .update(self.config_json.logdir.clone().as_str());
+            self.scheduler_processes.push(sched_proc);
+
+            info!("Scheduler {} launched", scheduler.name);
             std::thread::sleep(Duration::from_secs(2));
         }
     }
@@ -202,6 +209,23 @@ impl Launcher {
         self.config_status = String::from("Config loaded successfully");
         self.last_config_update = std::time::Instant::now();
 
+        // Update info string, targets, coverage, and crash report for each scheduler
+        for sched_proc in &mut self.scheduler_processes {
+            // Optionally: re-build targets if configuration changed (non-blocking)
+            // The build happens in background, we update last_build_at optimistically
+            let build_result = build_targets(sched_proc.config.clone(), sched_proc.last_build_at);
+            if let Some(build_time) = build_result {
+                sched_proc.last_build_at = Some(build_time);
+            }
+
+            let _update = sched_proc
+                .scheduler
+                .update(self.config_json.logdir.clone().as_str());
+            let _ = sched_proc.scheduler.report_crashes();
+
+            sched_proc.scheduler.collect_coverage();
+        }
+
         // Remove schedulers that are gone from config
         let scheduler_names_in_config: std::collections::HashSet<String> = self
             .config_json
@@ -262,23 +286,6 @@ impl Launcher {
                     last_build_at,
                 ));
             }
-        }
-
-        // Update info string, targets, coverage, and crash report for each scheduler
-        for sched_proc in &mut self.scheduler_processes {
-            // Optionally: re-build targets if configuration changed (non-blocking)
-            // The build happens in background, we update last_build_at optimistically
-            let build_result = build_targets(sched_proc.config.clone(), sched_proc.last_build_at);
-            if let Some(build_time) = build_result {
-                sched_proc.last_build_at = Some(build_time);
-            }
-
-            let _update = sched_proc
-                .scheduler
-                .update(self.config_json.logdir.clone().as_str());
-            let _ = sched_proc.scheduler.report_crashes();
-
-            sched_proc.scheduler.collect_coverage();
         }
     }
 

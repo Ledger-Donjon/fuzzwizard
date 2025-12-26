@@ -184,7 +184,7 @@ impl App {
             tasks_cache: std::collections::HashMap::new(),
             crashes: Vec::new(),
             last_crashes_date: Local::now().naive_local(),
-            last_update: None,
+            last_update: Some(Instant::now()),
             update_sender: Some(update_sender),
             update_receiver: Some(update_receiver),
             pending_update: false,

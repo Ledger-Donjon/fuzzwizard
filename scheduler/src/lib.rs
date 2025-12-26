@@ -120,6 +120,7 @@ pub struct Task {
     /// The stderr of the fuzzer process
     stderr: ChildStderr,
     started_at: Instant,
+    container_name: Option<String>,
     /// Status of the task (running, crashed, or stopped)
     pub status: TaskStatus,
 }
@@ -295,6 +296,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             fs::create_dir_all(&fuzzer_coveragedir)?;
         }
         let mut child: Child;
+        let mut task_container_name: Option<String> = None;
 
         if let Some(ref container_image) = self.container_image {
             if let Some(ref binary) = self.container_binary {
@@ -349,11 +351,12 @@ impl<C: TargetsCollector> Scheduler<C> {
                     if let Ok(mut v) = reg.lock() {
                         v.push(ProcessRecord {
                             pid: child.id(),
-                            container_name: Some(name),
+                            container_name: Some(name.clone()),
                             fuzzer_name: fuzzer_name.to_string(),
                         });
                     }
                 }
+                task_container_name = Some(name);
             } else {
                 return Err(SchedulerError::MissingContainerBinary);
             }
@@ -389,6 +392,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             path: fuzzer_path,
             started_at: Instant::now(),
             status: TaskStatus::Running,
+            container_name: task_container_name,
         })
     }
 
@@ -552,54 +556,35 @@ impl<C: TargetsCollector> Scheduler<C> {
         if !self.has_coverage {
             return;
         }
-        if let Some(registry) = PROCESS_REGISTRY.get() {
-            if let Ok(records) = registry.lock() {
-                for rec in records.iter() {
-                    info!(
-                        "collecting coverage for: {:?} for {}",
-                        rec, self.scheduler_name
-                    );
-                    if let Some(name) = &rec.container_name {
-                        if let Some(ref binary) = self.container_binary {
-                            // Spawn non-blocking: fire and forget
-                            let binary_clone = binary.clone();
-                            let name_clone = name.clone();
-                            let fuzzer_name_clone = rec.fuzzer_name.clone();
-                            let _ = std::thread::spawn(move || {
-                                let _ = Command::new(&binary_clone)
-                                    .args([
-                                        "exec",
-                                        &name_clone,
-                                        "pkill",
-                                        "-SIGUSR1",
-                                        "-f",
-                                        "binary",
-                                    ])
-                                    .stdout(std::process::Stdio::null())
-                                    .stderr(std::process::Stdio::null())
-                                    .spawn()
-                                    .and_then(|mut child| child.wait());
-                                debug!(
-                                    "coverage collected  '{} ' '{} ' '{} ' '{} '",
-                                    binary_clone.display(),
-                                    name_clone,
-                                    "pkill -SIGUSR1 -f",
-                                    fuzzer_name_clone
-                                );
-                            });
-                        }
-                    } else {
-                        // Spawn non-blocking: fire and forget
-                        let fuzzer_name_clone = rec.fuzzer_name.clone();
-                        let _ = std::thread::spawn(move || {
-                            let _ = Command::new("pkill")
-                                .args(["-SIGUSR1", "-f", &fuzzer_name_clone])
-                                .stdout(std::process::Stdio::null())
-                                .stderr(std::process::Stdio::null())
-                                .spawn()
-                                .and_then(|mut child| child.wait());
-                        });
-                    }
+        for (_, task) in self.tasks.iter() {
+            info!("collecting coverage for: {:?}", task.path);
+            if let Some(name) = &task.container_name {
+                if let Some(ref binary) = self.container_binary {
+                    let _ = Command::new(binary)
+                        .args(["exec", name, "pkill", "-SIGUSR1", "-f", "binary"])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .and_then(|mut child| child.wait());
+                }
+            } else {
+                let fuzzer_name = task
+                    .path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .ok_or(SchedulerError::InconsistentState(
+                        "invalid fuzzer path name",
+                    ))
+                    .unwrap_or("None");
+                if fuzzer_name != "None" {
+                    let _ = Command::new("pkill")
+                        .args(["-SIGUSR1", "-f", fuzzer_name])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .and_then(|mut child| child.wait());
+                } else {
+                    info!("No coverage collection for: {:?}", task.path);
                 }
             }
         }
