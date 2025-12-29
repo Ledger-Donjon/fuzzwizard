@@ -124,6 +124,9 @@ impl Launcher {
                 &scheduler_config_path,
                 self.config_json.logdir.clone(),
                 self.config_json.container_binary.clone(),
+                self.slack_channel.clone(),
+                self.slack_token.clone(),
+                self.config_json.slack_alert,
             );
 
             let mut sched_proc = SchedulerProcess::new(
@@ -147,25 +150,25 @@ impl Launcher {
 
     pub fn update_proc_status(&mut self) {
         for i in (0..self.procs.len()).rev() {
-            if matches!(self.procs[i].status, ProcessStatus::Running) {
-                if let Some(status) = self.procs[i].child.try_wait().unwrap() {
-                    let name = self.procs[i].name.clone();
-                    let uptime = self.procs[i].started_at.elapsed().as_secs();
-                    let text = format!(
-                        "Process {} exited with {:?} after {}s",
-                        name,
-                        status.code(),
-                        uptime
-                    );
-                    self.procs[i].info = text.clone();
-                    self.procs[i].status = ProcessStatus::Stopped;
-                    send_slack_alert(
-                        &self.slack_token,
-                        &self.slack_channel,
-                        &text.clone(),
-                        self.config_json.slack_alert,
-                    );
-                }
+            if matches!(self.procs[i].status, ProcessStatus::Running)
+                && let Some(status) = self.procs[i].child.try_wait().unwrap()
+            {
+                let name = self.procs[i].name.clone();
+                let uptime = self.procs[i].started_at.elapsed().as_secs();
+                let text = format!(
+                    "Process {} exited with {:?} after {}s",
+                    name,
+                    status.code(),
+                    uptime
+                );
+                self.procs[i].info = text.clone();
+                self.procs[i].status = ProcessStatus::Stopped;
+                send_slack_alert(
+                    &self.slack_token,
+                    &self.slack_channel,
+                    &text.clone(),
+                    self.config_json.slack_alert,
+                );
             }
         }
     }
@@ -181,7 +184,13 @@ impl Launcher {
         for sched_proc in &mut self.scheduler_processes {
             // Optionally: re-build targets if configuration changed (non-blocking)
             // The build happens in background, we update last_build_at optimistically
-            let build_result = build_targets(sched_proc.config.clone(), sched_proc.last_build_at);
+            let build_result = build_targets(
+                sched_proc.config.clone(),
+                sched_proc.last_build_at,
+                self.slack_channel.clone(),
+                self.slack_channel.clone(),
+                self.config_json.slack_alert,
+            );
             if let Some(build_time) = build_result {
                 sched_proc.last_build_at = Some(build_time);
             }
@@ -256,6 +265,9 @@ impl Launcher {
                         &scheduler.config.clone(),
                         self.config_json.logdir.clone(),
                         self.config_json.container_binary.clone(),
+                        self.slack_channel.clone(),
+                        self.slack_token.clone(),
+                        self.config_json.slack_alert,
                     );
                     sched_proc.path = PathBuf::from(scheduler.path.clone());
                     sched_proc.started_at = Instant::now();
@@ -275,50 +287,22 @@ impl Launcher {
                     &scheduler.config.clone(),
                     self.config_json.logdir.clone(),
                     self.config_json.container_binary.clone(),
+                    self.slack_channel.clone(),
+                    self.slack_token.clone(),
+                    self.config_json.slack_alert,
                 );
-                self.scheduler_processes.push(SchedulerProcess::new(
+                let mut new_scheduler = SchedulerProcess::new(
                     scheduler.name.clone(),
                     PathBuf::from(scheduler.path.clone()),
                     Instant::now(),
                     scheduler_started,
                     config,
                     last_build_at,
-                ));
-            }
-        }
-    }
-
-    /// Collect information about processes and check if they are still running
-    pub fn collect_proc_info(&mut self) {
-        for proc in &mut self.procs {
-            match proc.child.try_wait() {
-                Ok(None) => {
-                    // Process is still running
-                    proc.status = ProcessStatus::Running;
-                }
-                Ok(Some(status)) => {
-                    // Process has exited
-                    let name = proc.name.clone();
-                    let uptime = proc.started_at.elapsed().as_secs();
-                    proc.status = ProcessStatus::Stopped;
-                    proc.info = format!(
-                        "Process '{}' exited with {:?} after {}s",
-                        name,
-                        status.code(),
-                        uptime
-                    );
-                    send_slack_alert(
-                        &self.slack_token,
-                        &self.slack_channel,
-                        &proc.info.clone(),
-                        self.config_json.slack_alert,
-                    );
-                }
-                Err(_) => {
-                    // Error checking status, assume stopped
-                    proc.status = ProcessStatus::Stopped;
-                    proc.info = format!("Process '{}' status check failed", proc.name);
-                }
+                );
+                let _update = new_scheduler
+                    .scheduler
+                    .update(self.config_json.logdir.clone().as_str());
+                self.scheduler_processes.push(new_scheduler);
             }
         }
     }
@@ -471,6 +455,9 @@ fn send_slack_alert(token: &str, channel: &str, text: &str, should_send: bool) {
 fn build_targets(
     config_json: scheduler::SchedulerConfig,
     last_build_at: Option<Instant>,
+    slack_channel: String,
+    slack_token: String,
+    slack_alert: bool,
 ) -> Option<Instant> {
     // Run build_script in background thread (non-blocking)
     let now = Instant::now();
@@ -500,9 +487,24 @@ fn build_targets(
                 "build_script exited with status: {} for {}",
                 s, scheduler_name
             );
+            send_slack_alert(
+                &slack_token,
+                &slack_channel,
+                &format!(
+                    "build_script exited with status: {} for {}",
+                    s, scheduler_name
+                ),
+                slack_alert,
+            );
         }
         Err(e) => {
             error!("Failed to run build_script for {}: {}", scheduler_name, e);
+            send_slack_alert(
+                &slack_token,
+                &slack_channel,
+                &format!("Failed to run build_script for {}: {}", scheduler_name, e),
+                slack_alert,
+            );
         }
     }
 
@@ -514,6 +516,9 @@ fn create_scheduler(
     config_path: &str,
     logdir: String,
     container_binary: Option<String>,
+    slack_channel: String,
+    slack_token: String,
+    slack_alert: bool,
 ) -> (
     Scheduler<DirectoryTargetsCollector>,
     SchedulerConfig,
@@ -539,7 +544,13 @@ fn create_scheduler(
             .map(PathBuf::from)
             .collect(),
     };
-    let last_build_at = build_targets(config_json.clone(), None);
+    let last_build_at = build_targets(
+        config_json.clone(),
+        None,
+        slack_channel,
+        slack_token,
+        slack_alert,
+    );
     let scheduler = Scheduler::new(
         collector,
         config_json.clone(),

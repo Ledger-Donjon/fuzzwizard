@@ -330,10 +330,10 @@ impl App {
 
             // Update proc status (fast, non-blocking)
             {
-                if self.tabs.index == 0 {
-                    if let Ok(mut launcher) = self.launcher.try_write() {
-                        launcher.update_proc_status();
-                    }
+                if self.tabs.index == 0
+                    && let Ok(mut launcher) = self.launcher.try_write()
+                {
+                    launcher.update_proc_status();
                 }
 
                 let now = Instant::now();

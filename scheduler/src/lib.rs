@@ -329,12 +329,12 @@ impl<C: TargetsCollector> Scheduler<C> {
 
                 // Then image and command
                 args.push(container_image.clone());
-                if let Some(ref opts) = self.container_options {
-                    if !opts.is_empty() {
-                        for opt in opts {
-                            if !opt.is_empty() {
-                                args.push(opt.clone());
-                            }
+                if let Some(ref opts) = self.container_options
+                    && !opts.is_empty()
+                {
+                    for opt in opts {
+                        if !opt.is_empty() {
+                            args.push(opt.clone());
                         }
                     }
                 }
@@ -347,14 +347,14 @@ impl<C: TargetsCollector> Scheduler<C> {
                     .args(args.iter().map(|s| s.as_str()))
                     .stderr(Stdio::piped())
                     .spawn()?;
-                if let Some(reg) = PROCESS_REGISTRY.get() {
-                    if let Ok(mut v) = reg.lock() {
-                        v.push(ProcessRecord {
-                            pid: child.id(),
-                            container_name: Some(name.clone()),
-                            fuzzer_name: fuzzer_name.to_string(),
-                        });
-                    }
+                if let Some(reg) = PROCESS_REGISTRY.get()
+                    && let Ok(mut v) = reg.lock()
+                {
+                    v.push(ProcessRecord {
+                        pid: child.id(),
+                        container_name: Some(name.clone()),
+                        fuzzer_name: fuzzer_name.to_string(),
+                    });
                 }
                 task_container_name = Some(name);
             } else {
@@ -373,14 +373,14 @@ impl<C: TargetsCollector> Scheduler<C> {
                 ])
                 .stderr(Stdio::piped())
                 .spawn()?;
-            if let Some(reg) = PROCESS_REGISTRY.get() {
-                if let Ok(mut v) = reg.lock() {
-                    v.push(ProcessRecord {
-                        pid: child.id(),
-                        container_name: None,
-                        fuzzer_name: fuzzer_name.to_string(),
-                    });
-                }
+            if let Some(reg) = PROCESS_REGISTRY.get()
+                && let Ok(mut v) = reg.lock()
+            {
+                v.push(ProcessRecord {
+                    pid: child.id(),
+                    container_name: None,
+                    fuzzer_name: fuzzer_name.to_string(),
+                });
             }
         }
         let Some(child_stderr) = child.stderr.take() else {
@@ -403,20 +403,20 @@ impl<C: TargetsCollector> Scheduler<C> {
         if let Ok(records) = registry.lock() {
             for rec in records.iter() {
                 info!("Killing task: {:?}", rec.fuzzer_name);
-                if let Some(name) = &rec.container_name {
-                    if let Some(ref binary) = self.container_binary {
-                        // Spawn non-blocking: fire and forget
-                        let binary_clone = binary.clone();
-                        let name_clone = name.clone();
-                        let _ = std::thread::spawn(move || {
-                            let _ = Command::new(&binary_clone)
-                                .args(["rm", "-f", &name_clone])
-                                .stdout(std::process::Stdio::null())
-                                .stderr(std::process::Stdio::null())
-                                .spawn()
-                                .and_then(|mut child| child.wait());
-                        });
-                    }
+                if let Some(name) = &rec.container_name
+                    && let Some(ref binary) = self.container_binary
+                {
+                    // Spawn non-blocking: fire and forget
+                    let binary_clone = binary.clone();
+                    let name_clone = name.clone();
+                    let _ = std::thread::spawn(move || {
+                        let _ = Command::new(&binary_clone)
+                            .args(["rm", "-f", &name_clone])
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn()
+                            .and_then(|mut child| child.wait());
+                    });
                 }
                 // Spawn non-blocking: fire and forget
                 let pid = rec.pid;
