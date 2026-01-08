@@ -1,9 +1,11 @@
 {
   "scheduler_name": "internal_test_scheduler",
-  "targets_directory": ["./tests/test_targets/test_fuzzers/build"],
-  "build_script": "./tests/test_targets/build_and_collect.sh",
+  "targets_directory": ["/Volumes/PROJECTS/Work/fuzzwizard/scheduler/tests/test_targets/test_fuzzers/build"],
+  "build_script": "/Volumes/PROJECTS/Work/fuzzwizard/scheduler/tests/test_targets/build_and_collect.sh",
   "backend_url": "http://127.0.0.1:3000",
   "corpus_directory": "/tmp/corpus",
   "crashes_directory": "/tmp/crashes",
-  "coverage_directory": "/tmp/coverage"
+  "coverage_directory": "/tmp/coverage",
+  "has_coverage": false,
+  "state_file": "/tmp/internal_test_scheduler_state.json"
 }

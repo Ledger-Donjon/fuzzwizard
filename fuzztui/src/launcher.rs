@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: © 2026 LEDGER SAS
+// SPDX-License-Identifier: GPL-3.0-only
+
 use log::{error, info};
 use reqwest::blocking::Client;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap};
@@ -33,7 +36,7 @@ pub struct SchedulerProcess {
     pub scheduler: Scheduler<DirectoryTargetsCollector>,
     pub info: String,
     pub status: ProcessStatus,
-    config: SchedulerConfig,
+    pub config: SchedulerConfig,
     pub last_build_at: Option<Instant>,
 }
 
@@ -41,7 +44,6 @@ pub struct SchedulerProcess {
 #[derive(Serialize, Deserialize)]
 struct SchedulerConf {
     name: String,
-    path: String,
     config: String,
 }
 
@@ -51,7 +53,7 @@ pub struct Config {
     database_url: String,
     pub logdir: String,
     container_binary: Option<String>,
-    slack_alert: bool,
+    pub slack_alert: bool,
 }
 
 pub struct Launcher {
@@ -101,9 +103,24 @@ impl Launcher {
             panic!("schedulers array in config.json must not be empty");
         }
 
-        // Spawn backend
-        self.procs
-            .push(spawn_process("backend", "cargo", &["run", "-p", "backend"]));
+        // Spawn backend with --database-url argument from config
+        // Arguments after -- are passed to the binary, not to cargo
+        let backend_args = [
+            "run".to_string(),
+            "-p".to_string(),
+            "backend".to_string(),
+            "--".to_string(),
+            "--database-url".to_string(),
+            self.config_json.database_url.clone(),
+        ];
+        self.procs.push(spawn_process(
+            "backend",
+            "cargo",
+            &backend_args
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<&str>>(),
+        ));
         info!("backend launched");
         std::thread::sleep(Duration::from_secs(3));
         // Spawn slackwizard
@@ -269,7 +286,7 @@ impl Launcher {
                         self.slack_token.clone(),
                         self.config_json.slack_alert,
                     );
-                    sched_proc.path = PathBuf::from(scheduler.path.clone());
+                    sched_proc.path = PathBuf::from(&scheduler.config);
                     sched_proc.started_at = Instant::now();
                     sched_proc.scheduler = scheduler_started;
                     sched_proc.config = config;
@@ -293,7 +310,7 @@ impl Launcher {
                 );
                 let mut new_scheduler = SchedulerProcess::new(
                     scheduler.name.clone(),
-                    PathBuf::from(scheduler.path.clone()),
+                    PathBuf::from(&scheduler.config),
                     Instant::now(),
                     scheduler_started,
                     config,
@@ -421,13 +438,14 @@ pub fn require_env(name: &str) -> String {
 }
 
 fn spawn_process(name: &str, cmd: &str, args: &[&str]) -> ManagedProcess {
-    let child = Command::new(cmd)
+    let mut command = Command::new(cmd);
+    command
         .args(args)
         .stdout(Stdio::null()) // Redirect stdout to /dev/null to avoid breaking TUI
         .stderr(Stdio::null()) // Redirect stderr to /dev/null to avoid breaking TUI
-        .env("RUST_LOG", "error") // Only show errors, not info logs
-        .spawn()
-        .expect("failed to spawn process");
+        .env("RUST_LOG", "error"); // Only show errors, not info logs
+
+    let child = command.spawn().expect("failed to spawn process");
     ManagedProcess {
         name: name.to_string(),
         child,

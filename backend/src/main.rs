@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: © 2026 LEDGER SAS
+// SPDX-License-Identifier: GPL-3.0-only
+
 use crate::schema::crashes;
 use axum::{
     Json, Router,
@@ -22,6 +25,26 @@ mod schema;
 
 #[tokio::main]
 async fn main() {
+    // Parse command line arguments
+    let args: Vec<String> = env::args().collect();
+    let mut db_url = String::new();
+
+    for i in 0..args.len() {
+        if args[i] == "--database-url" || args[i] == "--db-url" {
+            if i + 1 < args.len() {
+                db_url = args[i + 1].clone();
+            } else {
+                eprintln!("Error: {} requires a value", args[i]);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if db_url.is_empty() {
+        eprintln!("Error: --database-url (or --db-url) argument is required");
+        std::process::exit(1);
+    }
+
     // Configure ftail to write to a file
     let log_file_path = "./logs/backend.log";
     // Ensure logs directory exists
@@ -35,7 +58,6 @@ async fn main() {
         .init()
         .expect("Failed to initialize logger");
 
-    let db_url = env::var("DATABASE_URL").expect("DATABASE URL must be set");
     let db_connection = Arc::new(Mutex::new(PgConnection::establish(&db_url).unwrap()));
 
     let app = Router::new()

@@ -1,17 +1,22 @@
+// SPDX-FileCopyrightText: © 2026 LEDGER SAS
+// SPDX-License-Identifier: GPL-3.0-only
+
 use chrono::{TimeDelta, prelude::*};
 use humantime::format_duration;
-use log::{debug, info};
+use log::{debug, info, warn};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::{
     collections::{HashMap, HashSet},
     fs, io,
     io::Read,
     path::PathBuf,
     process::{Child, ChildStderr, Command, Stdio},
+    sync::mpsc,
+    thread,
 };
 use thiserror::Error;
 
@@ -35,7 +40,6 @@ pub enum SchedulerError {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-
 pub struct SchedulerConfig {
     pub scheduler_name: String,
     pub targets_directory: Vec<String>,
@@ -47,6 +51,47 @@ pub struct SchedulerConfig {
     pub container_image: Option<String>,
     pub container_options: Option<Vec<String>>,
     pub has_coverage: bool,
+    pub state_file: Option<String>,
+}
+
+/// Represents the state of a single fuzzer in the state file
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum FuzzerStateCommand {
+    /// User command to start the fuzzer
+    START,
+    /// User command to stop the fuzzer
+    STOP,
+    /// User command to restart the fuzzer
+    RESTART,
+    /// Automatic state: fuzzer is running
+    RUNNING,
+    /// Automatic state: fuzzer has crashed
+    CRASHED,
+    /// Automatic state: fuzzer has been stopped
+    STOPPED,
+}
+
+/// Represents a fuzzer entry in the state file
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FuzzerStateEntry {
+    pub path: String,
+    pub sha: String,
+    pub state: FuzzerStateCommand,
+    /// Container name if the fuzzer is running in a container (for easy attachment)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container_name: Option<String>,
+    /// Environment variables to set when starting the fuzzer
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub var_env: Option<HashMap<String, String>>,
+    /// Command line options to pass to the fuzzer
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cmd_options: Option<Vec<String>>,
+}
+
+/// Represents the complete state file
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct StateFile {
+    pub fuzzers: Vec<FuzzerStateEntry>,
 }
 
 /// Convenient result alias for the scheduler crate
@@ -84,6 +129,8 @@ pub struct Scheduler<C: TargetsCollector> {
     container_binary: Option<PathBuf>,
     container_options: Option<Vec<String>>,
     has_coverage: bool,
+    /// Path to the state file (if configured)
+    state_file_path: Option<PathBuf>,
 }
 
 #[derive(Serialize, Clone)]
@@ -110,6 +157,23 @@ pub enum TaskStatus {
     Stopped,
 }
 
+/// Information about a task's status and timestamps (without the process handle)
+#[derive(Debug, Clone)]
+pub struct TaskStatusInfo {
+    /// SHA hash of the fuzzer binary
+    pub sha: Sha,
+    /// Path of the fuzzer binary
+    pub path: PathBuf,
+    /// Status of the task
+    pub status: TaskStatus,
+    /// Timestamp when the task started
+    pub started_at: Instant,
+    /// Timestamp when the task crashed (if applicable)
+    pub crashed_at: Option<Instant>,
+    /// Timestamp when the task was stopped (if applicable)
+    pub stopped_at: Option<Instant>,
+}
+
 /// A fuzzing task to be scheduled by the [`Scheduler`]
 #[derive(Debug)]
 pub struct Task {
@@ -123,6 +187,10 @@ pub struct Task {
     container_name: Option<String>,
     /// Status of the task (running, crashed, or stopped)
     pub status: TaskStatus,
+    /// Timestamp when the task crashed (if applicable)
+    crashed_at: Option<Instant>,
+    /// Timestamp when the task was stopped (if applicable)
+    stopped_at: Option<Instant>,
 }
 
 static PROCESS_REGISTRY: OnceLock<Arc<Mutex<Vec<ProcessRecord>>>> = OnceLock::new();
@@ -170,10 +238,38 @@ fn install_ctrlc_handler() {
 }
 
 impl<C: TargetsCollector> Scheduler<C> {
+    /// Get the path to the state file
+    pub fn state_file_path(&self) -> Option<&PathBuf> {
+        self.state_file_path.as_ref()
+    }
+
     /// Create a new [`Scheduler`].
     pub fn new(collector: C, config: SchedulerConfig, container_binary: Option<PathBuf>) -> Self {
         // Ensure Ctrl-C handler is installed once
         install_ctrlc_handler();
+
+        // Determine state file path: use config value or default to /tmp/{scheduler_name}_state.json
+        let state_file_path = config
+            .state_file
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(format!("/tmp/{}_state.json", config.scheduler_name)));
+
+        // Create empty state file at startup (overwrite any existing file)
+        let empty_state = StateFile {
+            fuzzers: Vec::new(),
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&empty_state) {
+            if let Err(e) = fs::write(&state_file_path, json) {
+                info!(
+                    "Failed to create state file {}: {}",
+                    state_file_path.display(),
+                    e
+                );
+            } else {
+                info!("Created empty state file: {}", state_file_path.display());
+            }
+        }
+
         Self {
             collector,
             targets: HashMap::new(),
@@ -187,11 +283,269 @@ impl<C: TargetsCollector> Scheduler<C> {
             container_binary,
             coverage_directory: config.coverage_directory.into(),
             has_coverage: config.has_coverage,
+            state_file_path: Some(state_file_path),
         }
+    }
+
+    /// Read the state file and return the state entries
+    fn read_state_file(&self) -> Result<Option<StateFile>> {
+        let Some(ref state_path) = self.state_file_path else {
+            return Ok(None);
+        };
+
+        // Try to read the file
+        let contents = match fs::read_to_string(state_path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                // File doesn't exist yet, create empty one
+                let empty_state = StateFile {
+                    fuzzers: Vec::new(),
+                };
+                if let Ok(json) = serde_json::to_string_pretty(&empty_state) {
+                    let _ = fs::write(state_path, json);
+                }
+                return Ok(Some(empty_state));
+            }
+            Err(e) => {
+                // Other error, log and return empty state
+                info!(
+                    "Failed to read state file {}: {}, using empty state",
+                    state_path.display(),
+                    e
+                );
+                return Ok(Some(StateFile {
+                    fuzzers: Vec::new(),
+                }));
+            }
+        };
+
+        // Try to parse JSON
+        match serde_json::from_str::<StateFile>(&contents) {
+            Ok(state) => Ok(Some(state)),
+            Err(e) => {
+                // File is corrupted or invalid, log and return empty state
+                info!(
+                    "Failed to parse state file {}: {}, using empty state",
+                    state_path.display(),
+                    e
+                );
+                Ok(Some(StateFile {
+                    fuzzers: Vec::new(),
+                }))
+            }
+        }
+    }
+
+    /// Write the state file with current fuzzer states
+    fn write_state_file(&self) -> Result<()> {
+        let Some(ref state_path) = self.state_file_path else {
+            return Ok(());
+        };
+
+        // Ensure parent directory exists
+        if let Some(parent) = state_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // Read existing state file to preserve var_env and cmd_options
+        let existing_state = self.read_state_file()?;
+        let mut existing_entries: HashMap<String, &FuzzerStateEntry> = HashMap::new();
+        if let Some(ref state) = existing_state {
+            for entry in &state.fuzzers {
+                existing_entries.insert(entry.sha.clone(), entry);
+            }
+        }
+
+        // Build state from current tasks
+        let mut fuzzers = Vec::new();
+        for (sha, task) in &self.tasks {
+            let state = match task.status {
+                TaskStatus::Running => FuzzerStateCommand::RUNNING,
+                TaskStatus::Crashed => FuzzerStateCommand::CRASHED,
+                TaskStatus::Stopped => FuzzerStateCommand::STOPPED,
+            };
+            let sha_str = hex::encode(sha);
+            // Preserve var_env and cmd_options from existing entry if present
+            let existing_entry = existing_entries.get(&sha_str);
+            fuzzers.push(FuzzerStateEntry {
+                path: task.path.display().to_string(),
+                sha: sha_str,
+                state,
+                container_name: task.container_name.clone(),
+                var_env: existing_entry.and_then(|e| e.var_env.clone()),
+                cmd_options: existing_entry.and_then(|e| e.cmd_options.clone()),
+            });
+        }
+
+        // Also include targets that are not yet started
+        for (sha, path) in &self.targets {
+            if !self.tasks.contains_key(sha) {
+                let sha_str = hex::encode(sha);
+                // Preserve var_env and cmd_options from existing entry if present
+                let existing_entry = existing_entries.get(&sha_str);
+                fuzzers.push(FuzzerStateEntry {
+                    path: path.display().to_string(),
+                    sha: sha_str,
+                    state: FuzzerStateCommand::STOPPED,
+                    container_name: None,
+                    var_env: existing_entry.and_then(|e| e.var_env.clone()),
+                    cmd_options: existing_entry.and_then(|e| e.cmd_options.clone()),
+                });
+            }
+        }
+
+        let state_file = StateFile { fuzzers };
+
+        // Write atomically: write to temp file then rename
+        let temp_path = state_path.with_extension("tmp");
+        let json = serde_json::to_string_pretty(&state_file).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to serialize state: {}", e),
+            )
+        })?;
+        fs::write(&temp_path, json)?;
+        fs::rename(&temp_path, state_path)?;
+
+        Ok(())
+    }
+
+    /// Apply user commands from the state file
+    fn apply_state_file_commands(&mut self, state_file: &StateFile, logdir: &str) -> Result<()> {
+        // Create a map of SHA -> entry for quick lookup
+        let mut entries: HashMap<String, &FuzzerStateEntry> = HashMap::new();
+        for entry in &state_file.fuzzers {
+            entries.insert(entry.sha.clone(), entry);
+        }
+
+        // Process each command
+        for (sha_str, entry) in &entries {
+            // Parse SHA from hex string
+            let sha_bytes = match hex::decode(sha_str) {
+                Ok(bytes) if bytes.len() == 32 => {
+                    let mut sha: Sha = [0u8; 32];
+                    sha.copy_from_slice(&bytes);
+                    sha
+                }
+                _ => {
+                    debug!("Invalid SHA in state file: {}", sha_str);
+                    continue;
+                }
+            };
+
+            match entry.state {
+                FuzzerStateCommand::START => {
+                    // Start the fuzzer if it's STOPPED or CRASHED (not RUNNING)
+                    let should_start = if let Some(task) = self.tasks.get(&sha_bytes) {
+                        task.status != TaskStatus::Running
+                    } else {
+                        true // Not in tasks, so we should start it
+                    };
+
+                    if should_start {
+                        // Find the path for this SHA
+                        if let Some(path) = self.targets.get(&sha_bytes) {
+                            info!(
+                                "Starting fuzzer from state file: {} (0x{})",
+                                path.display(),
+                                sha_str
+                            );
+                            let fuzzer_path = path.canonicalize()?;
+                            let var_env = entry.var_env.as_ref();
+                            let cmd_options = entry.cmd_options.as_ref();
+                            let task = self.start_task(fuzzer_path, var_env, cmd_options)?;
+                            self.tasks.insert(sha_bytes, task);
+                            let mut logfile = fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(format!("{}/running_tasks.log", logdir))?;
+                            let current_date = Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
+                            writeln!(
+                                logfile,
+                                "[{}]{} : 0x{}",
+                                current_date,
+                                path.display(),
+                                sha_str
+                            )?;
+                        }
+                    }
+                }
+                FuzzerStateCommand::STOP => {
+                    // Stop the fuzzer if it's running
+                    if let Some(task) = self.tasks.get_mut(&sha_bytes)
+                        && task.status == TaskStatus::Running
+                    {
+                        info!("Stopping fuzzer from state file: 0x{}", sha_str);
+                        let _ = task.child.kill();
+                        task.status = TaskStatus::Stopped;
+                        task.stopped_at = Some(Instant::now());
+                    }
+                }
+                FuzzerStateCommand::STOPPED => {
+                    // This is an automatic state, not a user command, so we ignore it
+                }
+                FuzzerStateCommand::RESTART => {
+                    // Restart the fuzzer if it's already RUNNING
+                    // If it's STOPPED or CRASHED, we need to change state to START first
+                    if let Some(task) = self.tasks.get(&sha_bytes) {
+                        if task.status == TaskStatus::Running {
+                            // Restart a running fuzzer
+                            info!("Restarting running fuzzer from state file: 0x{}", sha_str);
+                            if let Some(mut task) = self.tasks.remove(&sha_bytes) {
+                                let _ = task.child.kill();
+                                if let Some(path) = self.targets.get(&sha_bytes) {
+                                    let fuzzer_path = path.canonicalize()?;
+                                    let var_env = entry.var_env.as_ref();
+                                    let cmd_options = entry.cmd_options.as_ref();
+                                    let new_task =
+                                        self.start_task(fuzzer_path, var_env, cmd_options)?;
+                                    self.tasks.insert(sha_bytes, new_task);
+                                    let mut logfile = fs::OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open(format!("{}/running_tasks.log", logdir))?;
+                                    let current_date =
+                                        Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
+                                    writeln!(
+                                        logfile,
+                                        "[{}]{} : 0x{} (restarted)",
+                                        current_date,
+                                        path.display(),
+                                        sha_str
+                                    )?;
+                                }
+                            }
+                        } else {
+                            // Fuzzer is STOPPED or CRASHED, need to change state to START first
+                            info!(
+                                "RESTART requested for STOPPED/CRASHED fuzzer 0x{}, but state must be changed to START first",
+                                sha_str
+                            );
+                        }
+                    } else {
+                        // Fuzzer not in tasks, need to change state to START first
+                        info!(
+                            "RESTART requested for non-existent fuzzer 0x{}, but state must be changed to START first",
+                            sha_str
+                        );
+                    }
+                }
+                FuzzerStateCommand::RUNNING | FuzzerStateCommand::CRASHED => {
+                    // These are automatic states, not user commands, so we ignore them
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Update the scheduler with the latest targets collected by the collector.
     pub fn update(&mut self, logdir: &str) -> Result<()> {
+        // Read and apply user commands from state file if it exists
+        if let Some(state_file) = self.read_state_file()? {
+            self.apply_state_file_commands(&state_file, logdir)?;
+        }
+
         let latest_targets = self.collector.collect_targets();
 
         debug!("latest_targets: {:?}", latest_targets);
@@ -209,6 +563,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             if let Some(task) = self.tasks.get_mut(target) {
                 let _ = task.child.kill(); // Try to kill, but don't fail if already dead
                 task.status = TaskStatus::Stopped;
+                task.stopped_at = Some(Instant::now());
             } else {
                 return Err(SchedulerError::InconsistentState(
                     "task missing during stop",
@@ -229,7 +584,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                 ));
             };
             let fuzzer_path = path.canonicalize()?;
-            let task = self.start_task(fuzzer_path)?;
+            let task = self.start_task(fuzzer_path, None, None)?;
             self.tasks.insert(*target, task);
             let current_date = Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
             writeln!(
@@ -260,7 +615,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                 ));
             };
             let fuzzer_path = path.canonicalize()?;
-            let task = self.start_task(fuzzer_path)?;
+            let task = self.start_task(fuzzer_path, None, None)?;
             // Replace the stopped task with the new running one
             self.tasks.insert(*target, task);
         }
@@ -269,10 +624,18 @@ impl<C: TargetsCollector> Scheduler<C> {
 
         self.targets = latest_targets;
 
+        // Write the state file with current states
+        self.write_state_file()?;
+
         Ok(())
     }
 
-    fn start_task(&self, fuzzer_path: PathBuf) -> Result<Task> {
+    fn start_task(
+        &self,
+        fuzzer_path: PathBuf,
+        var_env: Option<&HashMap<String, String>>,
+        cmd_options: Option<&Vec<String>>,
+    ) -> Result<Task> {
         let fuzzer_name = fuzzer_path.file_name().and_then(|s| s.to_str()).ok_or(
             SchedulerError::InconsistentState("invalid fuzzer path name"),
         )?;
@@ -343,10 +706,23 @@ impl<C: TargetsCollector> Scheduler<C> {
                 args.push("/fuzzer/corpus_dir/".into());
                 args.push("-artifact_prefix=/fuzzer/crash_dir/".into());
 
-                child = Command::new(binary)
-                    .args(args.iter().map(|s| s.as_str()))
-                    .stderr(Stdio::piped())
-                    .spawn()?;
+                // Add custom command options from state file if provided
+                if let Some(custom_opts) = cmd_options {
+                    args.extend(custom_opts.iter().cloned());
+                }
+
+                // Add environment variables from state file if provided (using -e for docker)
+                if let Some(env_vars) = var_env {
+                    for (key, value) in env_vars {
+                        args.push("-e".into());
+                        args.push(format!("{}={}", key, value));
+                    }
+                }
+
+                let mut cmd = Command::new(binary);
+                cmd.args(args.iter().map(|s| s.as_str()));
+
+                child = cmd.stderr(Stdio::piped()).spawn()?;
                 if let Some(reg) = PROCESS_REGISTRY.get()
                     && let Ok(mut v) = reg.lock()
                 {
@@ -361,18 +737,44 @@ impl<C: TargetsCollector> Scheduler<C> {
                 return Err(SchedulerError::MissingContainerBinary);
             }
         } else {
-            child = Command::new(&fuzzer_path)
-                .args([
-                    &fuzzer_corpus.display().to_string(),
-                    &format!("-artifact_prefix={}{}", fuzzer_crashdir.display(), "/"),
-                    // coverage file output option
-                    &format!(
-                        "-LLVM_PROFILE_FILE={}/%p.profraw",
-                        fuzzer_coveragedir.display() // Or wherever you want to store profraws; adjust as needed
-                    ),
-                ])
-                .stderr(Stdio::piped())
-                .spawn()?;
+            // Build command arguments
+            let mut args = vec![
+                fuzzer_corpus.display().to_string(),
+                format!("-artifact_prefix={}{}", fuzzer_crashdir.display(), "/"),
+            ];
+
+            // Add coverage file output option if coverage is enabled
+            if self.has_coverage {
+                args.push(format!(
+                    "-LLVM_PROFILE_FILE={}/%p.profraw",
+                    fuzzer_coveragedir.display()
+                ));
+            }
+
+            // Add custom command options from state file if provided
+            if let Some(custom_opts) = cmd_options {
+                args.extend(custom_opts.iter().cloned());
+            }
+
+            let mut cmd = Command::new(&fuzzer_path);
+            cmd.args(&args);
+
+            // Set environment variables from state file if provided
+            if let Some(env_vars) = var_env {
+                for (key, value) in env_vars {
+                    cmd.env(key, value);
+                }
+            }
+
+            // Always set coverage environment variable if coverage is enabled
+            if self.has_coverage {
+                cmd.env(
+                    "LLVM_PROFILE_FILE",
+                    format!("{}/%p.profraw", fuzzer_coveragedir.display()),
+                );
+            }
+
+            child = cmd.stderr(Stdio::piped()).spawn()?;
             if let Some(reg) = PROCESS_REGISTRY.get()
                 && let Ok(mut v) = reg.lock()
             {
@@ -393,6 +795,8 @@ impl<C: TargetsCollector> Scheduler<C> {
             started_at: Instant::now(),
             status: TaskStatus::Running,
             container_name: task_container_name,
+            crashed_at: None,
+            stopped_at: None,
         })
     }
 
@@ -447,6 +851,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                     info!("CRASH - task has exited: {:?}", task.child.id());
                     // Task has exited - mark as crashed and report it
                     task.status = TaskStatus::Crashed;
+                    task.crashed_at = Some(Instant::now());
 
                     let mut stderr = String::new();
                     task.stderr.read_to_string(&mut stderr)?;
@@ -503,31 +908,64 @@ impl<C: TargetsCollector> Scheduler<C> {
                 Err(e) => return Err(SchedulerError::Io(e)),
             }
         }
+        // Update state file after checking for crashes
+        self.write_state_file()?;
         Ok(())
     }
 
-    /// Get tasks with their status (running or stopped)
-    pub fn get_tasks_with_status(&mut self) -> Vec<(Sha, PathBuf, TaskStatus)> {
-        let mut result: Vec<([u8; 32], PathBuf, TaskStatus)> = Vec::new();
+    /// Get tasks with their status and timestamps
+    pub fn get_tasks_with_status(&mut self) -> Vec<TaskStatusInfo> {
+        let mut result: Vec<TaskStatusInfo> = Vec::new();
 
         for (hash, task) in self.tasks.iter_mut() {
             // Only check tasks that are still running
             if task.status != TaskStatus::Running {
-                result.push((*hash, task.path.clone(), task.status));
+                result.push(TaskStatusInfo {
+                    sha: *hash,
+                    path: task.path.clone(),
+                    status: task.status,
+                    started_at: task.started_at,
+                    crashed_at: task.crashed_at,
+                    stopped_at: task.stopped_at,
+                });
                 continue;
             }
             match task.child.try_wait() {
                 Ok(None) => {
-                    result.push((*hash, task.path.clone(), task.status));
+                    result.push(TaskStatusInfo {
+                        sha: *hash,
+                        path: task.path.clone(),
+                        status: task.status,
+                        started_at: task.started_at,
+                        crashed_at: task.crashed_at,
+                        stopped_at: task.stopped_at,
+                    });
                     // Task is still running, keep it as Running
                 }
                 Ok(Some(_)) => {
                     // Task has exited - mark as crashed and report it
-                    result.push((*hash, task.path.clone(), TaskStatus::Crashed));
+                    let crashed_at = Some(Instant::now());
+                    task.crashed_at = crashed_at;
+                    task.status = TaskStatus::Crashed;
+                    result.push(TaskStatusInfo {
+                        sha: *hash,
+                        path: task.path.clone(),
+                        status: task.status,
+                        started_at: task.started_at,
+                        crashed_at: task.crashed_at,
+                        stopped_at: task.stopped_at,
+                    });
                 }
                 Err(_) => {
                     // Task is still running, keep it as Running
-                    result.push((*hash, task.path.clone(), task.status));
+                    result.push(TaskStatusInfo {
+                        sha: *hash,
+                        path: task.path.clone(),
+                        status: task.status,
+                        started_at: task.started_at,
+                        crashed_at: task.crashed_at,
+                        stopped_at: task.stopped_at,
+                    });
                 }
             }
         }
@@ -556,16 +994,82 @@ impl<C: TargetsCollector> Scheduler<C> {
         if !self.has_coverage {
             return;
         }
+        const TIMEOUT_SECS: u64 = 10; // 10 seconds timeout
+
         for (_, task) in self.tasks.iter() {
+            // Only collect coverage for running tasks
+            if task.status != TaskStatus::Running {
+                continue;
+            }
+
             info!("collecting coverage for: {:?}", task.path);
+
             if let Some(name) = &task.container_name {
                 if let Some(ref binary) = self.container_binary {
-                    let _ = Command::new(binary)
-                        .args(["exec", name, "pkill", "-SIGUSR1", "-f", "binary"])
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .spawn()
-                        .and_then(|mut child| child.wait());
+                    let binary_clone = binary.clone();
+                    let name_for_thread = name.clone();
+                    let name_for_log = name.clone();
+                    let (tx, rx) = mpsc::channel();
+
+                    // Spawn command in a thread
+                    thread::spawn(move || {
+                        match Command::new(&binary_clone)
+                            .args([
+                                "exec",
+                                &name_for_thread,
+                                "pkill",
+                                "-SIGUSR1",
+                                "-f",
+                                "binary",
+                            ])
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .spawn()
+                        {
+                            Ok(mut child) => {
+                                let status = child.wait();
+                                let _ = tx.send(status);
+                            }
+                            Err(e) => {
+                                let _ = tx.send(Err(e));
+                            }
+                        }
+                    });
+
+                    // Wait for completion with timeout
+                    match rx.recv_timeout(Duration::from_secs(TIMEOUT_SECS)) {
+                        Ok(Ok(status)) => {
+                            if status.success() {
+                                info!(
+                                    "Coverage collection successful for container: {}",
+                                    name_for_log
+                                );
+                            } else {
+                                warn!(
+                                    "Coverage collection failed for container {}: {:?}",
+                                    name_for_log, status
+                                );
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            warn!(
+                                "Failed to execute coverage collection for container {}: {}",
+                                name_for_log, e
+                            );
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            warn!(
+                                "Coverage collection timeout ({}s) for container: {}",
+                                TIMEOUT_SECS, name_for_log
+                            );
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            warn!(
+                                "Coverage collection thread disconnected for container: {}",
+                                name_for_log
+                            );
+                        }
+                    }
                 }
             } else {
                 let fuzzer_name = task
@@ -575,14 +1079,60 @@ impl<C: TargetsCollector> Scheduler<C> {
                     .ok_or(SchedulerError::InconsistentState(
                         "invalid fuzzer path name",
                     ))
-                    .unwrap_or("None");
-                if fuzzer_name != "None" {
-                    let _ = Command::new("pkill")
-                        .args(["-SIGUSR1", "-f", fuzzer_name])
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .spawn()
-                        .and_then(|mut child| child.wait());
+                    .unwrap_or("unknown");
+                if fuzzer_name != "unknown" {
+                    let fuzzer_name_clone = fuzzer_name.to_string();
+                    let (tx, rx) = mpsc::channel();
+
+                    // Spawn command in a thread
+                    thread::spawn(move || {
+                        match Command::new("pkill")
+                            .args(["-SIGUSR1", "-f", &fuzzer_name_clone])
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .spawn()
+                        {
+                            Ok(mut child) => {
+                                let status = child.wait();
+                                let _ = tx.send(status);
+                            }
+                            Err(e) => {
+                                let _ = tx.send(Err(e));
+                            }
+                        }
+                    });
+
+                    // Wait for completion with timeout
+                    match rx.recv_timeout(Duration::from_secs(TIMEOUT_SECS)) {
+                        Ok(Ok(status)) => {
+                            if status.success() {
+                                info!("Coverage collection successful for fuzzer: {}", fuzzer_name);
+                            } else {
+                                warn!(
+                                    "Coverage collection failed for fuzzer {}: {:?}",
+                                    fuzzer_name, status
+                                );
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            warn!(
+                                "Failed to execute coverage collection for fuzzer {}: {}",
+                                fuzzer_name, e
+                            );
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            warn!(
+                                "Coverage collection timeout ({}s) for fuzzer: {}",
+                                TIMEOUT_SECS, fuzzer_name
+                            );
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            warn!(
+                                "Coverage collection thread disconnected for fuzzer: {}",
+                                fuzzer_name
+                            );
+                        }
+                    }
                 } else {
                     info!("No coverage collection for: {:?}", task.path);
                 }

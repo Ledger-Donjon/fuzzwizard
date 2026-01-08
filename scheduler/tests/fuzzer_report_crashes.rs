@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: © 2026 LEDGER SAS
+// SPDX-License-Identifier: GPL-3.0-only
+
 use std::{collections::HashMap, fs, path::PathBuf, time::Duration};
 
 use scheduler::{Scheduler, SchedulerConfig, Sha, TargetsCollector};

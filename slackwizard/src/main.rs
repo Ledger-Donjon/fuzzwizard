@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: © 2026 LEDGER SAS
+// SPDX-License-Identifier: GPL-3.0-only
+
 use chrono::{NaiveDate, NaiveDateTime};
 use ftail::Ftail;
 use log::LevelFilter;

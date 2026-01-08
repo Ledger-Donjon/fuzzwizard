@@ -1,10 +1,13 @@
-use chrono::{Local, NaiveDateTime, TimeDelta};
+// SPDX-FileCopyrightText: © 2026 LEDGER SAS
+// SPDX-License-Identifier: GPL-3.0-only
+
+use chrono::{DateTime, Local, NaiveDateTime, TimeDelta, Utc};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock, mpsc};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 mod launcher;
 use ftail::Ftail;
 use humantime::format_duration;
@@ -36,6 +39,9 @@ pub struct TaskInfo {
     pub sha_hex: String,
     pub path: PathBuf,
     pub is_running: TaskStatus,
+    pub started_at: Option<std::time::Instant>,
+    pub crashed_at: Option<std::time::Instant>,
+    pub stopped_at: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +68,7 @@ struct SchedulerDisplayInfo {
     started_at: Instant,
     info: String,
     last_build_at: Option<Instant>,
+    state_file_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -245,7 +252,7 @@ impl App {
                         filename,
                         scheduler_name,
                         created_at: NaiveDateTime::parse_from_str(
-                            &created_at,
+                            created_at.as_str(),
                             "%Y-%m-%dT%H:%M:%S%.f",
                         )
                         .ok()?,
@@ -293,6 +300,7 @@ impl App {
                     started_at: s.started_at,
                     info: s.info.clone(),
                     last_build_at: s.last_build_at,
+                    state_file_path: s.config.state_file.clone(),
                 })
                 .collect();
         }
@@ -437,15 +445,29 @@ impl App {
             for scheduler_index in 0..launcher.scheduler_processes.len() {
                 let scheduler = &mut launcher.scheduler_processes[scheduler_index];
                 let tasks_with_status = scheduler.scheduler.get_tasks_with_status();
-                let tasks: Vec<TaskInfo> = tasks_with_status
+                let mut tasks: Vec<TaskInfo> = tasks_with_status
                     .into_iter()
-                    .map(|(sha, path, is_running)| TaskInfo {
-                        sha,
-                        sha_hex: hex::encode(sha),
-                        path,
-                        is_running,
+                    .map(|task_status| TaskInfo {
+                        sha: task_status.sha,
+                        sha_hex: hex::encode(task_status.sha),
+                        path: task_status.path,
+                        is_running: task_status.status,
+                        started_at: Some(task_status.started_at),
+                        crashed_at: task_status.crashed_at,
+                        stopped_at: task_status.stopped_at,
                     })
                     .collect();
+
+                // Sort tasks: RUNNING first, then CRASHED, then STOPPED
+                tasks.sort_by(|a, b| {
+                    let order = |status: &TaskStatus| match status {
+                        TaskStatus::Running => 0,
+                        TaskStatus::Crashed => 1,
+                        TaskStatus::Stopped => 2,
+                    };
+                    order(&a.is_running).cmp(&order(&b.is_running))
+                });
+
                 self.tasks_cache.insert(scheduler_index, tasks);
             }
         }
@@ -596,6 +618,13 @@ impl Widget for &App {
                         scheduler.info.clone().dim(),
                     ]));
 
+                    if let Some(ref state_file) = scheduler.state_file_path {
+                        lines.push(Line::from(vec![
+                            "    State File: ".into(),
+                            state_file.clone().cyan(),
+                        ]));
+                    }
+
                     let build_tds = if let Some(last_build_at) = scheduler.last_build_at {
                         let build_td = TimeDelta::new(last_build_at.elapsed().as_secs() as i64, 0)
                             .expect("Failed to create TimeDelta")
@@ -663,9 +692,17 @@ impl Widget for &App {
                         "Info: ".into(),
                         selected_scheduler.info.clone().into(),
                     ]),
-                    Line::from(""), // Empty line separator
-                    Line::from("Tasks:".bold()),
                 ];
+
+                if let Some(ref state_file) = selected_scheduler.state_file_path {
+                    lines.push(Line::from(vec![
+                        "State File: ".into(),
+                        state_file.clone().cyan(),
+                    ]));
+                }
+
+                lines.push(Line::from("")); // Empty line separator
+                lines.push(Line::from("Tasks:".bold()));
 
                 // Add tasks information
                 if let Some(tasks) = self.tasks_cache.get(&scheduler_index) {
@@ -678,6 +715,65 @@ impl Widget for &App {
                                 TaskStatus::Crashed => "Crashed".red(),
                                 TaskStatus::Stopped => "Stopped".red(),
                             };
+
+                            // Format date based on status
+                            let date_text = match task_info.is_running {
+                                TaskStatus::Running => {
+                                    if let Some(started) = task_info.started_at {
+                                        let elapsed = started.elapsed();
+                                        let td = TimeDelta::new(elapsed.as_secs() as i64, 0)
+                                            .expect("Failed to create TimeDelta")
+                                            .to_std()
+                                            .unwrap();
+                                        format!("Started: {} ago", format_duration(td))
+                                    } else {
+                                        "Started: unknown".to_string()
+                                    }
+                                }
+                                TaskStatus::Crashed => {
+                                    if let Some(crashed) = task_info.crashed_at {
+                                        // Convert Instant to date/time by calculating when it happened
+                                        // We approximate by using current time minus elapsed time
+                                        let elapsed = crashed.elapsed();
+                                        let crash_time_since_epoch = SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap()
+                                            .checked_sub(elapsed)
+                                            .unwrap_or_default();
+                                        let dt_utc = DateTime::<Utc>::from_timestamp(
+                                            crash_time_since_epoch.as_secs() as i64,
+                                            crash_time_since_epoch.subsec_nanos(),
+                                        )
+                                        .unwrap_or_else(Utc::now);
+                                        let dt = dt_utc.with_timezone(&Local);
+                                        format!("Crashed: {}", dt.format("%Y-%m-%d %H:%M:%S"))
+                                    } else {
+                                        "Crashed: unknown".to_string()
+                                    }
+                                }
+                                TaskStatus::Stopped => {
+                                    if let Some(stopped) = task_info.stopped_at {
+                                        // Convert Instant to date/time by calculating when it happened
+                                        // We approximate by using current time minus elapsed time
+                                        let elapsed = stopped.elapsed();
+                                        let stop_time_since_epoch = SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap()
+                                            .checked_sub(elapsed)
+                                            .unwrap_or_default();
+                                        let dt_utc = DateTime::<Utc>::from_timestamp(
+                                            stop_time_since_epoch.as_secs() as i64,
+                                            stop_time_since_epoch.subsec_nanos(),
+                                        )
+                                        .unwrap_or_else(Utc::now);
+                                        let dt = dt_utc.with_timezone(&Local);
+                                        format!("Stopped: {}", dt.format("%Y-%m-%d %H:%M:%S"))
+                                    } else {
+                                        "Stopped: unknown".to_string()
+                                    }
+                                }
+                            };
+
                             lines.push(Line::from(vec![
                                 "  • ".into(),
                                 format!("0x{}", &task_info.sha_hex[..16]).cyan(), // Show first 16 chars
@@ -692,6 +788,7 @@ impl Widget for &App {
                                 " - ".into(),
                                 status_text,
                             ]));
+                            lines.push(Line::from(vec!["    ".into(), date_text.dim()]));
                         }
                     }
                 } else {
@@ -720,13 +817,22 @@ fn main() -> io::Result<()> {
         std::process::exit(1);
     };
 
-    let slack_token = require_env("SLACK_TOKEN");
-    let slack_channel = require_env("SLACK_CHANNEL");
-
     let str_config_file = std::fs::read_to_string(config_path.clone())
         .unwrap_or_else(|_| panic!("Failed to read config file {}", config_path.display()));
     let config_json = serde_json::from_str::<launcher::Config>(&str_config_file)
         .expect("Failed to parse config.json");
+
+    // Only require Slack environment variables if slack_alert is enabled
+    let slack_token = if config_json.slack_alert {
+        require_env("SLACK_TOKEN")
+    } else {
+        String::new()
+    };
+    let slack_channel = if config_json.slack_alert {
+        require_env("SLACK_CHANNEL")
+    } else {
+        String::new()
+    };
 
     // Configure ftail to write to a file in logdir
     let log_file_path = format!("{}/fuzztui.log", config_json.logdir);
