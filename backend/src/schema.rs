@@ -1,6 +1,15 @@
-// SPDX-FileCopyrightText: © 2026 LEDGER SAS
-// SPDX-License-Identifier: GPL-3.0-only
 // @generated automatically by Diesel CLI.
+
+diesel::table! {
+    admin_events (id) {
+        id -> Int4,
+        event_type -> Text,
+        message -> Text,
+        metadata -> Nullable<Text>,
+        created_at -> Timestamp,
+        processed -> Bool,
+    }
+}
 
 diesel::table! {
     crashes (id) {
@@ -13,3 +22,5 @@ diesel::table! {
         created_at -> Timestamp,
     }
 }
+
+diesel::allow_tables_to_appear_in_same_query!(admin_events, crashes,);

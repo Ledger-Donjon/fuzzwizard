@@ -1,46 +1,68 @@
 // SPDX-FileCopyrightText: © 2026 LEDGER SAS
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: MIT
 
 use ftail::Ftail;
-use log::LevelFilter;
 use log::error;
 use log::info;
-use scheduler::{Scheduler, Sha, TargetsCollector};
-use sha3::{Digest, Sha3_256};
+use log::LevelFilter;
+use scheduler::{DirectoryTargetsCollector, Scheduler};
 use std::env;
+use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
-use std::{collections::HashMap, fs, os::unix::fs::PermissionsExt, path::PathBuf};
-
-struct DirectoryTargetsCollector {
-    targets_directories: Vec<PathBuf>,
-}
-
-impl TargetsCollector for DirectoryTargetsCollector {
-    fn collect_targets(&self) -> HashMap<Sha, PathBuf> {
-        let mut targets = HashMap::new();
-        for directory in self.targets_directories.iter().cloned() {
-            for direntry in fs::read_dir(directory).unwrap() {
-                let direntry = direntry.unwrap();
-                let target_path = direntry.path();
-                if !target_path.is_file() {
-                    continue;
-                }
-                if target_path.metadata().unwrap().permissions().mode() & 0o111 == 0 {
-                    continue;
-                }
-
-                let target_hash = Sha3_256::digest(fs::read(&target_path).unwrap());
-                targets.insert(target_hash.into(), target_path);
-            }
-        }
-        targets
-    }
-}
 fn build_targets(config_json: scheduler::SchedulerConfig) {
-    // Static to keep track of last build time
+    // Validate build script for security
+    let build_script = &config_json.build_script;
+
+    // Check script is not empty
+    if build_script.trim().is_empty() {
+        error!("Build script is empty, refusing to execute");
+        return;
+    }
+
+    // Check for null bytes
+    if build_script.contains('\0') {
+        error!("Build script contains null bytes, refusing to execute");
+        return;
+    }
+
+    // Check script length (max 64KB)
+    if build_script.len() > 65536 {
+        error!(
+            "Build script too long ({} bytes), refusing to execute",
+            build_script.len()
+        );
+        return;
+    }
+
+    // Check for dangerous shell patterns that could indicate command injection
+    // Note: This is defense in depth - the config file should be trusted, but we validate anyway
+    const DANGEROUS_PATTERNS: &[&str] = &[
+        // Command chaining that could be abused
+        "&&", "||", ";", // Command substitution
+        "`", "$(", // Redirection that could overwrite files
+        ">>", "<<",
+    ];
+
+    // Only warn for dangerous patterns since build scripts may legitimately use some of these
+    for pattern in DANGEROUS_PATTERNS {
+        if build_script.contains(pattern) {
+            info!(
+                "Warning: Build script contains potentially dangerous pattern '{}'. \
+                 Ensure the script is from a trusted source.",
+                pattern
+            );
+        }
+    }
+
+    // Log the script being executed for audit purposes
+    info!("Executing build script: {}", build_script);
+
     let status = Command::new("sh")
         .arg("-c")
-        .arg(config_json.build_script)
+        .arg(build_script)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status();
     match status {
         Ok(s) if s.success() => {
@@ -64,18 +86,24 @@ fn main() {
         }
     };
 
-    let config_contents = fs::read_to_string(config_path).expect("Failed to read config file");
+    let config_contents = match fs::read_to_string(config_path) {
+        Ok(contents) => contents,
+        Err(e) => {
+            eprintln!("Failed to read config file '{}': {}", config_path, e);
+            std::process::exit(1);
+        }
+    };
 
     let logdir = env::args().nth(2);
-    let logdir = match logdir {
-        Some(ref path) if !path.trim().is_empty() => path.trim(),
+    let logdir: String = match logdir {
+        Some(ref path) if !path.trim().is_empty() => path.trim().to_string(),
         _ => {
             eprintln!("Log directory not provided, using default ./logs");
-            "./logs"
+            "./logs".to_string()
         }
     };
     // If logdir does not exist, create it
-    if let Err(e) = std::fs::create_dir_all(logdir) {
+    if let Err(e) = std::fs::create_dir_all(&logdir) {
         eprintln!("Failed to create log directory '{}': {}", logdir, e);
         std::process::exit(1);
     }
@@ -84,30 +112,45 @@ fn main() {
     let log_file_path = format!("{}/scheduler.log", logdir);
     // Ensure the directory exists
     if let Some(parent) = std::path::Path::new(&log_file_path).parent() {
-        fs::create_dir_all(parent).expect("Failed to create log directory");
+        if let Err(e) = fs::create_dir_all(parent) {
+            eprintln!(
+                "Failed to create log directory '{}': {}",
+                parent.display(),
+                e
+            );
+            std::process::exit(1);
+        }
     }
 
-    Ftail::new()
+    if let Err(e) = Ftail::new()
         .single_file(
             std::path::Path::new(&log_file_path),
             true,
             LevelFilter::Info,
         )
         .init()
-        .expect("Failed to initialize logger");
+    {
+        eprintln!("Failed to initialize logger: {}", e);
+        std::process::exit(1);
+    }
 
     let container_binary = env::args().nth(3);
 
-    let config_json: scheduler::SchedulerConfig =
-        serde_json::from_str(&config_contents).expect("Failed to parse config file as JSON");
+    let config_json: scheduler::SchedulerConfig = match serde_json::from_str(&config_contents) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("Failed to parse config file as JSON: {}", e);
+            std::process::exit(1);
+        }
+    };
 
-    let collector = DirectoryTargetsCollector {
-        targets_directories: config_json
+    let collector = DirectoryTargetsCollector::new(
+        config_json
             .targets_directory
             .iter()
             .map(PathBuf::from)
             .collect(),
-    };
+    );
     build_targets(config_json.clone());
     let mut scheduler = Scheduler::new(
         collector,
@@ -117,7 +160,7 @@ fn main() {
 
     loop {
         build_targets(config_json.clone());
-        let _ = scheduler.update(logdir);
+        let _ = scheduler.update(&logdir);
         std::thread::sleep(std::time::Duration::from_secs(60));
         scheduler.report_crashes().unwrap();
         scheduler.log_running_tasks();

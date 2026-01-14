@@ -1,26 +1,26 @@
 // SPDX-FileCopyrightText: © 2026 LEDGER SAS
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: MIT
 
 use chrono::{DateTime, Local, NaiveDateTime, TimeDelta, Utc};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use std::io;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock, mpsc};
+use std::sync::{mpsc, Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 mod launcher;
 use ftail::Ftail;
 use humantime::format_duration;
-use launcher::{Launcher, ProcessStatus, require_env};
-use log::{LevelFilter, error, info};
+use launcher::{Launcher, ProcessStatus};
+use log::{error, info, LevelFilter};
 use ratatui::{
-    DefaultTerminal, Frame,
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
     style::Stylize,
     symbols::border,
     text::{Line, Text},
     widgets::{Block, Paragraph, Tabs, Widget},
+    DefaultTerminal, Frame,
 };
 use reqwest::Url;
 use scheduler::Sha;
@@ -116,7 +116,7 @@ pub struct App {
     exit: bool,
     tasks_cache: std::collections::HashMap<usize, Vec<TaskInfo>>, // Cache tasks per scheduler index
     crashes: Vec<CrashInfo>,
-    last_crashes_date: NaiveDateTime,
+    last_crashes_date: Option<NaiveDateTime>,
     last_update: Option<Instant>,
     update_sender: Option<mpsc::Sender<Option<NaiveDateTime>>>,
     update_receiver: Option<mpsc::Receiver<UpdateMessage>>,
@@ -124,6 +124,7 @@ pub struct App {
     launcher_update_sender: Option<mpsc::Sender<()>>, // Request launcher update
     status_update_receiver: Option<mpsc::Receiver<()>>, // Notification of completion
     launcher_cache: LauncherDisplayCache,
+    scroll_offset: u16, // Vertical scroll offset
 }
 
 impl App {
@@ -138,18 +139,11 @@ impl App {
 
         // Spawn background thread for crash updates
         thread::spawn(move || {
-            loop {
-                // Wait for update request with last_crashes_date
-                let date = match update_receiver_main.recv() {
-                    Ok(Some(last_date)) => last_date,
-                    Ok(None) => Local::now().naive_local(),
-                    Err(_) => {
-                        break; // Channel closed, exit thread
-                    }
-                };
+            while let Ok(date) = update_receiver_main.recv() {
+                let last_date = date;
 
                 info!("Background thread: Updating crashes");
-                let crashes_result = Self::update_crashes_async(Some(date));
+                let crashes_result = Self::update_crashes_async(last_date);
 
                 if let Ok((crashes, new_last_date)) = crashes_result {
                     let _ = update_sender_main.send(UpdateMessage {
@@ -190,7 +184,7 @@ impl App {
             exit: false,
             tasks_cache: std::collections::HashMap::new(),
             crashes: Vec::new(),
-            last_crashes_date: Local::now().naive_local(),
+            last_crashes_date: None,
             last_update: Some(Instant::now()),
             update_sender: Some(update_sender),
             update_receiver: Some(update_receiver),
@@ -202,6 +196,7 @@ impl App {
                 config_status: String::new(),
                 schedulers: Vec::new(),
             },
+            scroll_offset: 0,
         };
         // Initialize cache from launcher
         app.update_launcher_cache();
@@ -211,64 +206,132 @@ impl App {
         app
     }
 
+    fn parse_crash_json(crash: &serde_json::Value) -> Option<CrashInfo> {
+        let id = crash.get("id")?.as_i64()? as i32;
+        let filename = crash.get("filename")?.as_str()?.to_string();
+        let scheduler_name = crash.get("scheduler_name")?.as_str()?.to_string();
+
+        let created_at = if let Some(date_str) = crash.get("created_at")?.as_str() {
+            date_str.to_string()
+        } else {
+            format!("{:?}", crash.get("created_at"))
+        };
+
+        Some(CrashInfo {
+            id,
+            filename,
+            scheduler_name,
+            created_at: NaiveDateTime::parse_from_str(created_at.as_str(), "%Y-%m-%dT%H:%M:%S%.f")
+                .ok()?,
+        })
+    }
+
     fn update_crashes_async(
         last_crashes_date: Option<NaiveDateTime>,
     ) -> Result<(Vec<CrashInfo>, Option<NaiveDateTime>), ()> {
         let client = reqwest::blocking::Client::new();
-        let mut url = Url::parse("http://127.0.0.1:3000/crashes").map_err(|_| ())?;
-        let mut new_date = Local::now().naive_local();
+        info!("last_crashes_date: {:?}", last_crashes_date);
+        // If no last_crashes_date, fetch the last 10 crashes and get the date of the last one
+        if last_crashes_date.is_none() {
+            info!("fetching last 10 crashes");
+            let url = Url::parse("http://127.0.0.1:3000/crashes/last/10").map_err(|_| ())?;
+            info!("url: {}", url.as_str());
+            let response = client.get(url.as_str()).send().map_err(|_| ())?;
+            info!("response: {:?}", response);
 
-        if let Some(ref most_recent_date) = last_crashes_date {
-            url.query_pairs_mut().append_pair(
-                "after",
-                &most_recent_date.format("%Y-%m-%d %H:%M:%S%.f").to_string(),
-            );
-        }
-        info!("url: {}", url.as_str());
-        let response = client.get(url.as_str()).send().map_err(|_| ())?;
+            if response.status().is_success() {
+                let crashes_json: Vec<serde_json::Value> = response.json().map_err(|_| ())?;
+                if crashes_json.is_empty() {
+                    info!("no crashes found");
+                    return Ok((Vec::new(), None));
+                }
 
-        if response.status().is_success() {
-            let crashes_json: Vec<serde_json::Value> = response.json().map_err(|_| ())?;
-            if crashes_json.is_empty() {
-                info!("no crashes found");
-                return Ok((Vec::new(), Some(new_date)));
-            }
+                let mut new_crashes: Vec<CrashInfo> = crashes_json
+                    .into_iter()
+                    .filter_map(|crash| Self::parse_crash_json(&crash))
+                    .collect();
 
-            let mut new_crashes: Vec<CrashInfo> = crashes_json
-                .into_iter()
-                .filter_map(|crash| {
-                    let id = crash.get("id")?.as_i64()? as i32;
-                    let filename = crash.get("filename")?.as_str()?.to_string();
-                    let scheduler_name = crash.get("scheduler_name")?.as_str()?.to_string();
-
-                    let created_at = if let Some(date_str) = crash.get("created_at")?.as_str() {
-                        date_str.to_string()
-                    } else {
-                        format!("{:?}", crash.get("created_at"))
-                    };
-
-                    Some(CrashInfo {
-                        id,
-                        filename,
-                        scheduler_name,
-                        created_at: NaiveDateTime::parse_from_str(
-                            created_at.as_str(),
-                            "%Y-%m-%dT%H:%M:%S%.f",
-                        )
-                        .ok()?,
-                    })
-                })
-                .collect();
-
-            if !new_crashes.is_empty() {
-                new_crashes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-                new_date = new_crashes.first().map(|c| c.created_at).unwrap();
-                Ok((new_crashes, Some(new_date)))
+                if !new_crashes.is_empty() {
+                    new_crashes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                    // Get the date of the last (most recent) crash
+                    let last_date = new_crashes.first().map(|c| c.created_at);
+                    return Ok((new_crashes, last_date));
+                } else {
+                    return Ok((Vec::new(), None));
+                }
             } else {
-                Ok((Vec::new(), Some(new_date)))
+                return Ok((Vec::new(), None));
             }
+        }
+
+        // If we have a date, we need to fetch crashes since that date
+        // Use /crashes/ids?after to get IDs, then fetch each crash individually
+        let mut ids_url = Url::parse("http://127.0.0.1:3000/crashes/ids").map_err(|_| ())?;
+        ids_url.query_pairs_mut().append_pair(
+            "after",
+            &last_crashes_date
+                .unwrap()
+                .format("%Y-%m-%d %H:%M:%S%.f")
+                .to_string(),
+        );
+
+        info!("url: {}", ids_url.as_str());
+        let ids_response = client.get(ids_url.as_str()).send().map_err(|_| ())?;
+        if !ids_response.status().is_success() {
+            return Ok((Vec::new(), last_crashes_date));
+        }
+
+        let crash_ids: Vec<serde_json::Value> = ids_response.json().map_err(|_| ())?;
+        if crash_ids.is_empty() {
+            info!("no crashes found");
+            return Ok((Vec::new(), last_crashes_date));
+        }
+
+        // Fetch each crash individually
+        let mut new_crashes: Vec<CrashInfo> = Vec::new();
+        for crash_id_obj in crash_ids {
+            if let Some(id) = crash_id_obj.get("id").and_then(|v| v.as_i64()) {
+                let crash_url = format!("http://127.0.0.1:3000/crashes/{}", id);
+                match client.get(&crash_url).send() {
+                    Ok(crash_response) => {
+                        if crash_response.status().is_success() {
+                            match crash_response.json::<serde_json::Value>() {
+                                Ok(crash_json) => {
+                                    if let Some(crash_info) = Self::parse_crash_json(&crash_json) {
+                                        new_crashes.push(crash_info);
+                                    } else {
+                                        error!("Failed to parse crash {} from JSON", id);
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "Failed to parse response as JSON for crash {}: {}",
+                                        id, e
+                                    );
+                                }
+                            }
+                        } else {
+                            error!(
+                                "Failed to fetch crash {}: HTTP {}",
+                                id,
+                                crash_response.status()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to fetch crash {}: {}", id, e);
+                    }
+                }
+            }
+        }
+
+        if !new_crashes.is_empty() {
+            new_crashes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            // Get the date of the last (most recent) crash
+            let new_date = new_crashes.first().map(|c| c.created_at).unwrap();
+            Ok((new_crashes, Some(new_date)))
         } else {
-            Ok((Vec::new(), Some(new_date)))
+            Ok((Vec::new(), last_crashes_date))
         }
     }
 
@@ -324,7 +387,7 @@ impl App {
                     self.crashes.truncate(10);
 
                     if let Some(date) = update_msg.last_crashes_date {
-                        self.last_crashes_date = date;
+                        self.last_crashes_date = Some(date);
                     }
                 }
             }
@@ -338,10 +401,10 @@ impl App {
 
             // Update proc status (fast, non-blocking)
             {
-                if self.tabs.index == 0
-                    && let Ok(mut launcher) = self.launcher.try_write()
-                {
-                    launcher.update_proc_status();
+                if self.tabs.index == 0 {
+                    if let Ok(mut launcher) = self.launcher.try_write() {
+                        launcher.update_proc_status();
+                    }
                 }
 
                 let now = Instant::now();
@@ -363,7 +426,7 @@ impl App {
                 if should_update && !self.pending_update {
                     // Trigger background crash update (non-blocking)
                     if let Some(ref sender) = self.update_sender {
-                        let _ = sender.send(Some(self.last_crashes_date));
+                        let _ = sender.send(self.last_crashes_date);
                         self.pending_update = true;
                     }
 
@@ -404,8 +467,26 @@ impl App {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         match key_event.code {
             KeyCode::Char('q') => self.exit(),
-            KeyCode::Left => self.tabs.previous(),
-            KeyCode::Right => self.tabs.next(),
+            KeyCode::Left => {
+                self.tabs.previous();
+                self.scroll_offset = 0; // Reset scroll when changing tabs
+            }
+            KeyCode::Right => {
+                self.tabs.next();
+                self.scroll_offset = 0; // Reset scroll when changing tabs
+            }
+            KeyCode::Up => {
+                if self.scroll_offset > 0 {
+                    self.scroll_offset -= 1;
+                }
+            }
+            KeyCode::Down => {
+                // Limit scroll to prevent overflow (ratatui will handle the rest)
+                // We use a reasonable maximum to avoid issues
+                if self.scroll_offset < 10000 {
+                    self.scroll_offset += 1;
+                }
+            }
             _ => {}
         }
     }
@@ -532,6 +613,8 @@ impl Widget for &App {
             "<Q> ".blue().bold(),
             " | Navigate ".into(),
             "<Left/Right> ".blue().bold(),
+            " | Scroll ".into(),
+            "<Up/Down> ".blue().bold(),
         ]);
 
         let block = Block::bordered()
@@ -671,7 +754,10 @@ impl Widget for &App {
             }
 
             let text = Text::from(lines);
-            Paragraph::new(text).block(block).render(content_area, buf);
+            Paragraph::new(text)
+                .block(block)
+                .scroll((self.scroll_offset, 0))
+                .render(content_area, buf);
         } else {
             // Display scheduler information (index > 0)
             let scheduler_index = self.tabs.index - 1; // Adjust for "Processes" tab at index 0
@@ -796,10 +882,16 @@ impl Widget for &App {
                 }
 
                 let text = Text::from(lines);
-                Paragraph::new(text).block(block).render(content_area, buf);
+                Paragraph::new(text)
+                    .block(block)
+                    .scroll((self.scroll_offset, 0))
+                    .render(content_area, buf);
             } else {
                 let text = Text::from("No schedulers available");
-                Paragraph::new(text).block(block).render(content_area, buf);
+                Paragraph::new(text)
+                    .block(block)
+                    .scroll((self.scroll_offset, 0))
+                    .render(content_area, buf);
             }
         }
     }
@@ -817,21 +909,23 @@ fn main() -> io::Result<()> {
         std::process::exit(1);
     };
 
-    let str_config_file = std::fs::read_to_string(config_path.clone())
-        .unwrap_or_else(|_| panic!("Failed to read config file {}", config_path.display()));
-    let config_json = serde_json::from_str::<launcher::Config>(&str_config_file)
-        .expect("Failed to parse config.json");
-
-    // Only require Slack environment variables if slack_alert is enabled
-    let slack_token = if config_json.slack_alert {
-        require_env("SLACK_TOKEN")
-    } else {
-        String::new()
+    let str_config_file = match std::fs::read_to_string(config_path.clone()) {
+        Ok(contents) => contents,
+        Err(e) => {
+            eprintln!(
+                "Failed to read config file {}: {}",
+                config_path.display(),
+                e
+            );
+            std::process::exit(1);
+        }
     };
-    let slack_channel = if config_json.slack_alert {
-        require_env("SLACK_CHANNEL")
-    } else {
-        String::new()
+    let config_json = match serde_json::from_str::<launcher::Config>(&str_config_file) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("Failed to parse config.json: {}", e);
+            std::process::exit(1);
+        }
     };
 
     // Configure ftail to write to a file in logdir
@@ -845,18 +939,21 @@ fn main() -> io::Result<()> {
         std::process::exit(1);
     }
 
-    Ftail::new()
+    if let Err(e) = Ftail::new()
         .single_file(
             std::path::Path::new(&log_file_path),
             true,
             LevelFilter::Info,
         )
         .init()
-        .expect("Failed to initialize logger");
+    {
+        eprintln!("Failed to initialize logger: {}", e);
+        std::process::exit(1);
+    }
 
     let mut terminal = ratatui::init();
 
-    let mut launcher = Launcher::new(slack_token, slack_channel, config_path, config_json);
+    let mut launcher = Launcher::new(config_path, config_json);
     launcher.init();
 
     // Wrap launcher in Arc<RwLock<>> for thread-safe access

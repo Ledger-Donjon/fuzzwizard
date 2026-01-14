@@ -9,5 +9,18 @@
     "database_url": "postgres://postgres:postgres@127.0.0.1:5432/fuzzwizard",
     "logdir": "./logs",
     "container_binary" : "/bin/podman",
-    "slack_alert": false
+    "notifications": {
+        "notificator_state_file": "/tmp/notificator_state.txt",
+        "providers": {
+            "slack": {
+                "enabled": false,
+                "token": "",
+                "channel": ""
+            },
+            "file": {
+                "enabled": false,
+                "output_file": "./logs/crashes.log"
+            }
+        }
+    }
 }

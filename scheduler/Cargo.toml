@@ -1,8 +1,8 @@
 [package]
 name = "scheduler"
 version = "0.1.0"
-edition = "2024"
-license = "GPL-3.0-only"
+edition = "2021"
+license = "MIT"
 
 [dependencies]
 log = "0.4.27"

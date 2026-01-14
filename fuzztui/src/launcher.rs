@@ -1,18 +1,31 @@
 // SPDX-FileCopyrightText: © 2026 LEDGER SAS
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: MIT
 
 use log::{error, info};
 use reqwest::blocking::Client;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap};
 use serde::{Deserialize, Serialize};
-use sha3::{Digest, Sha3_256};
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
-use std::{collections::HashMap, fmt, fs};
+use std::{fmt, fs};
 
-use scheduler::{Scheduler, SchedulerConfig, Sha, TargetsCollector};
+use scheduler::{DirectoryTargetsCollector, Scheduler, SchedulerConfig};
+
+fn send_admin_event_to_backend(backend_url: &str, event_type: &str, message: &str) {
+    let client = Client::new();
+    let event = serde_json::json!({
+        "event_type": event_type,
+        "message": message,
+    });
+
+    if let Err(e) = client
+        .post(format!("{}/admin_events", backend_url))
+        .json(&event)
+        .send()
+    {
+        error!("Failed to send admin event to backend: {}", e);
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum ProcessStatus {
@@ -40,7 +53,7 @@ pub struct SchedulerProcess {
     pub last_build_at: Option<Instant>,
 }
 
-// C'est 2 structures représenent les champs de la config.json
+// These 2 structures represent the fields from config.json
 #[derive(Serialize, Deserialize)]
 struct SchedulerConf {
     name: String,
@@ -53,25 +66,21 @@ pub struct Config {
     database_url: String,
     pub logdir: String,
     container_binary: Option<String>,
-    pub slack_alert: bool,
 }
 
 pub struct Launcher {
-    slack_token: String,
-    slack_channel: String,
     config_path: PathBuf,
     config_json: Config,
     pub procs: Vec<ManagedProcess>,
     pub scheduler_processes: Vec<SchedulerProcess>,
     last_config_update: std::time::Instant,
     pub config_status: String,
+    backend_url: String,
 }
 
 impl fmt::Debug for Launcher {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Launcher")
-            .field("slack_token", &"***redacted***")
-            .field("slack_channel", &self.slack_channel)
             .field("config_path", &self.config_path)
             .field("procs", &self.procs)
             .field("last_config_update", &self.last_config_update)
@@ -80,16 +89,10 @@ impl fmt::Debug for Launcher {
 }
 
 impl Launcher {
-    pub fn new(
-        slack_token: String,
-        slack_channel: String,
-        config_path: PathBuf,
-        config_json: Config,
-    ) -> Self {
+    pub fn new(config_path: PathBuf, config_json: Config) -> Self {
         Launcher {
-            slack_token,
-            slack_channel,
             config_path,
+            backend_url: "http://127.0.0.1:3000".to_string(),
             config_json,
             procs: Vec::new(),
             scheduler_processes: Vec::new(),
@@ -122,16 +125,26 @@ impl Launcher {
                 .collect::<Vec<&str>>(),
         ));
         info!("backend launched");
+        send_admin_event_to_backend(&self.backend_url, "backend_launched", "Backend launched");
         std::thread::sleep(Duration::from_secs(3));
-        // Spawn slackwizard
-        if self.config_json.slack_alert {
-            self.procs.push(spawn_process(
-                "slackwizard",
-                "cargo",
-                &["run", "-p", "slackwizard"],
-            ));
-            info!("slackwizard launched");
-        }
+        // Spawn notificator (always active, but notifications depend on config)
+        let config_path_str = self.config_path.to_string_lossy().to_string();
+        let notificator_args = [
+            "run".to_string(),
+            "-p".to_string(),
+            "notificator".to_string(),
+            "--".to_string(),
+            config_path_str.clone(),
+        ];
+        self.procs.push(spawn_process(
+            "notificator",
+            "cargo",
+            &notificator_args
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<&str>>(),
+        ));
+        info!("notificator launched");
 
         // Launch all schedulers in the array, collect their children and start times
         for scheduler in &self.config_json.schedulers {
@@ -141,9 +154,6 @@ impl Launcher {
                 &scheduler_config_path,
                 self.config_json.logdir.clone(),
                 self.config_json.container_binary.clone(),
-                self.slack_channel.clone(),
-                self.slack_token.clone(),
-                self.config_json.slack_alert,
             );
 
             let mut sched_proc = SchedulerProcess::new(
@@ -161,31 +171,32 @@ impl Launcher {
             self.scheduler_processes.push(sched_proc);
 
             info!("Scheduler {} launched", scheduler.name);
+            send_admin_event_to_backend(
+                &self.backend_url,
+                "scheduler_launched",
+                &format!("Scheduler {} launched", scheduler.name),
+            );
             std::thread::sleep(Duration::from_secs(2));
         }
     }
 
     pub fn update_proc_status(&mut self) {
         for i in (0..self.procs.len()).rev() {
-            if matches!(self.procs[i].status, ProcessStatus::Running)
-                && let Some(status) = self.procs[i].child.try_wait().unwrap()
-            {
-                let name = self.procs[i].name.clone();
-                let uptime = self.procs[i].started_at.elapsed().as_secs();
-                let text = format!(
-                    "Process {} exited with {:?} after {}s",
-                    name,
-                    status.code(),
-                    uptime
-                );
-                self.procs[i].info = text.clone();
-                self.procs[i].status = ProcessStatus::Stopped;
-                send_slack_alert(
-                    &self.slack_token,
-                    &self.slack_channel,
-                    &text.clone(),
-                    self.config_json.slack_alert,
-                );
+            if matches!(self.procs[i].status, ProcessStatus::Running) {
+                if let Some(status) = self.procs[i].child.try_wait().unwrap() {
+                    let name = self.procs[i].name.clone();
+                    let uptime = self.procs[i].started_at.elapsed().as_secs();
+                    let text = format!(
+                        "Process {} exited with {:?} after {}s",
+                        name,
+                        status.code(),
+                        uptime
+                    );
+                    self.procs[i].info = text.clone();
+                    self.procs[i].status = ProcessStatus::Stopped;
+                    let backend_url = self.backend_url.clone();
+                    send_admin_event_to_backend(&backend_url, "process_crash", &text);
+                }
             }
         }
     }
@@ -204,20 +215,18 @@ impl Launcher {
             let build_result = build_targets(
                 sched_proc.config.clone(),
                 sched_proc.last_build_at,
-                self.slack_channel.clone(),
-                self.slack_channel.clone(),
-                self.config_json.slack_alert,
+                &self.backend_url,
             );
             if let Some(build_time) = build_result {
                 sched_proc.last_build_at = Some(build_time);
             }
 
+            let _ = sched_proc.scheduler.report_crashes();
+            sched_proc.scheduler.collect_coverage();
+
             let _update = sched_proc
                 .scheduler
                 .update(self.config_json.logdir.clone().as_str());
-            let _ = sched_proc.scheduler.report_crashes();
-
-            sched_proc.scheduler.collect_coverage();
         }
 
         let config_file = match std::fs::read_to_string(&self.config_path) {
@@ -282,9 +291,6 @@ impl Launcher {
                         &scheduler.config.clone(),
                         self.config_json.logdir.clone(),
                         self.config_json.container_binary.clone(),
-                        self.slack_channel.clone(),
-                        self.slack_token.clone(),
-                        self.config_json.slack_alert,
                     );
                     sched_proc.path = PathBuf::from(&scheduler.config);
                     sched_proc.started_at = Instant::now();
@@ -304,9 +310,6 @@ impl Launcher {
                     &scheduler.config.clone(),
                     self.config_json.logdir.clone(),
                     self.config_json.container_binary.clone(),
-                    self.slack_channel.clone(),
-                    self.slack_token.clone(),
-                    self.config_json.slack_alert,
                 );
                 let mut new_scheduler = SchedulerProcess::new(
                     scheduler.name.clone(),
@@ -355,12 +358,8 @@ impl Launcher {
                         "Scheduler '{}' stopped: removed from config",
                         scheduler.name
                     );
-                    send_slack_alert(
-                        &self.slack_token,
-                        &self.slack_channel,
-                        &scheduler.info.clone(),
-                        self.config_json.slack_alert,
-                    );
+                    let backend_url = self.backend_url.clone();
+                    send_admin_event_to_backend(&backend_url, "scheduler_removed", &scheduler.info);
                 }
             }
         }
@@ -407,36 +406,6 @@ impl SchedulerProcess {
     }
 }
 
-pub struct DirectoryTargetsCollector {
-    targets_directories: Vec<PathBuf>,
-}
-
-impl TargetsCollector for DirectoryTargetsCollector {
-    fn collect_targets(&self) -> HashMap<Sha, PathBuf> {
-        let mut targets = HashMap::new();
-        for directory in self.targets_directories.iter().cloned() {
-            for direntry in fs::read_dir(directory).unwrap() {
-                let direntry = direntry.unwrap();
-                let target_path = direntry.path();
-                if !target_path.is_file() {
-                    continue;
-                }
-                if target_path.metadata().unwrap().permissions().mode() & 0o111 == 0 {
-                    continue;
-                }
-
-                let target_hash = Sha3_256::digest(fs::read(&target_path).unwrap());
-                targets.insert(target_hash.into(), target_path);
-            }
-        }
-        targets
-    }
-}
-
-pub fn require_env(name: &str) -> String {
-    std::env::var(name).unwrap_or_else(|_| panic!("{} must be set", name))
-}
-
 fn spawn_process(name: &str, cmd: &str, args: &[&str]) -> ManagedProcess {
     let mut command = Command::new(cmd);
     command
@@ -455,27 +424,10 @@ fn spawn_process(name: &str, cmd: &str, args: &[&str]) -> ManagedProcess {
     }
 }
 
-fn send_slack_alert(token: &str, channel: &str, text: &str, should_send: bool) {
-    if !should_send {
-        return;
-    }
-    let mut headers = HeaderMap::new();
-    headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
-    headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
-    let client = Client::new();
-    let _ = client
-        .post("https://slack.com/api/chat.postMessage")
-        .headers(headers)
-        .json(&serde_json::json!({"channel": channel, "text": text}))
-        .send();
-}
-
 fn build_targets(
     config_json: scheduler::SchedulerConfig,
     last_build_at: Option<Instant>,
-    slack_channel: String,
-    slack_token: String,
-    slack_alert: bool,
+    backend_url: &str,
 ) -> Option<Instant> {
     // Run build_script in background thread (non-blocking)
     let now = Instant::now();
@@ -488,6 +440,13 @@ fn build_targets(
         info!("Build script already ran recently, skipping");
         return last_build_at;
     }
+
+    // Log the script being executed for audit purposes
+    info!(
+        "Executing build script for {}: {}",
+        scheduler_name, build_script
+    );
+
     let status = Command::new("sh")
         .arg("-c")
         .arg(&build_script)
@@ -501,28 +460,17 @@ fn build_targets(
             info!("build_script ran successfully for {}", scheduler_name);
         }
         Ok(s) => {
-            error!(
+            let msg = format!(
                 "build_script exited with status: {} for {}",
                 s, scheduler_name
             );
-            send_slack_alert(
-                &slack_token,
-                &slack_channel,
-                &format!(
-                    "build_script exited with status: {} for {}",
-                    s, scheduler_name
-                ),
-                slack_alert,
-            );
+            error!("{}", msg);
+            send_admin_event_to_backend(backend_url, "build_error", &msg);
         }
         Err(e) => {
-            error!("Failed to run build_script for {}: {}", scheduler_name, e);
-            send_slack_alert(
-                &slack_token,
-                &slack_channel,
-                &format!("Failed to run build_script for {}: {}", scheduler_name, e),
-                slack_alert,
-            );
+            let msg = format!("Failed to run build_script for {}: {}", scheduler_name, e);
+            error!("{}", msg);
+            send_admin_event_to_backend(backend_url, "build_error", &msg);
         }
     }
 
@@ -534,9 +482,6 @@ fn create_scheduler(
     config_path: &str,
     logdir: String,
     container_binary: Option<String>,
-    slack_channel: String,
-    slack_token: String,
-    slack_alert: bool,
 ) -> (
     Scheduler<DirectoryTargetsCollector>,
     SchedulerConfig,
@@ -549,25 +494,18 @@ fn create_scheduler(
     // If logdir does not exist, create it
     if let Err(e) = std::fs::create_dir_all(&logdir) {
         error!("Failed to create log directory '{}': {}", &logdir, e);
-        std::process::exit(1);
     }
 
     let config_json: scheduler::SchedulerConfig =
         serde_json::from_str(&config_contents).expect("Failed to parse config file as JSON");
 
-    let collector = DirectoryTargetsCollector {
-        targets_directories: config_json
+    let last_build_at = build_targets(config_json.clone(), None, "http://127.0.0.1:3000");
+    let collector = DirectoryTargetsCollector::new(
+        config_json
             .targets_directory
             .iter()
             .map(PathBuf::from)
             .collect(),
-    };
-    let last_build_at = build_targets(
-        config_json.clone(),
-        None,
-        slack_channel,
-        slack_token,
-        slack_alert,
     );
     let scheduler = Scheduler::new(
         collector,

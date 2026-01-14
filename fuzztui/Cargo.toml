@@ -1,12 +1,13 @@
 [package]
 name = "fuzztui"
 version = "0.1.0"
-edition = "2024"
-license = "GPL-3.0-only"
+edition = "2021"
+license = "MIT"
 
 [dependencies]
 crossterm = "0.29.0"
 ratatui = "0.29.0"
+lru = "0.16.3"
 serde_json = "1.0.145"
 scheduler = { path = "../scheduler" }
 chrono = "0.4.42"
