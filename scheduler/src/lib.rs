@@ -1469,13 +1469,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                         .find(|l| l.starts_with("artifact_prefix="))
                         .unwrap_or("Crash detected but no element in stderr");
                     let pattern = "Test unit written to ";
-                    let crash_corpus = match crash.find(pattern) {
-                        Some(pos) => &crash[pos + pattern.len()..],
-                        None => {
-                            warn!("Could not find '{}' pattern in crash stderr", pattern);
-                            continue; // Skip this crash if we can't find the pattern
-                        }
-                    };
+                    let crash_corpus = &crash[crash.find(pattern).unwrap_or(0) + pattern.len()..];
 
                     // If the task was run in a docker container, crash_corpus will be like /fuzzer/crash_dir/...
                     // We want to rewrite that path to use self.crashes_directory instead.
