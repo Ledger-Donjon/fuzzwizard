@@ -1222,14 +1222,26 @@ impl<C: TargetsCollector> Scheduler<C> {
             rng.fill(&mut data);
             file.write_all(&data)?;
         }
+        // Set permissions to 777 for container write access
+        let mut perms = fs::metadata(&fuzzer_corpus)?.permissions();
+        perms.set_mode(0o777);
+        fs::set_permissions(&fuzzer_corpus, perms)?;
         let fuzzer_crashdir = self.crashes_directory.join(fuzzer_name);
         if !fuzzer_crashdir.exists() {
             fs::create_dir_all(&fuzzer_crashdir)?;
         }
+        // Set permissions to 777 for container write access
+        let mut perms = fs::metadata(&fuzzer_crashdir)?.permissions();
+        perms.set_mode(0o777);
+        fs::set_permissions(&fuzzer_crashdir, perms)?;
         let fuzzer_coveragedir = self.coverage_directory.join(fuzzer_name);
         if !fuzzer_coveragedir.exists() {
             fs::create_dir_all(&fuzzer_coveragedir)?;
         }
+        // Set permissions to 777 for container write access
+        let mut perms = fs::metadata(&fuzzer_coveragedir)?.permissions();
+        perms.set_mode(0o777);
+        fs::set_permissions(&fuzzer_coveragedir, perms)?;
         let mut child: Child;
         let mut task_container_name: Option<String> = None;
         let mut random_cov: [u8; 4] = [0u8; 4];
