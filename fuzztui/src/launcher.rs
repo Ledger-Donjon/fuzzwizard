@@ -66,6 +66,8 @@ pub struct Config {
     database_url: String,
     pub logdir: String,
     container_binary: Option<String>,
+    backend_binary: Option<String>,
+    notificator_binary: Option<String>,
 }
 
 pub struct Launcher {
@@ -107,18 +109,29 @@ impl Launcher {
         }
 
         // Spawn backend with --database-url argument from config
-        // Arguments after -- are passed to the binary, not to cargo
-        let backend_args = [
-            "run".to_string(),
-            "-p".to_string(),
-            "backend".to_string(),
-            "--".to_string(),
-            "--database-url".to_string(),
-            self.config_json.database_url.clone(),
-        ];
+        let (backend_cmd, backend_args) =
+            if let Some(ref backend_binary) = self.config_json.backend_binary {
+                // Use release binary if specified
+                let args: Vec<String> = vec![
+                    "--database-url".to_string(),
+                    self.config_json.database_url.clone(),
+                ];
+                (backend_binary.clone(), args)
+            } else {
+                // Fallback to cargo run
+                let args = vec![
+                    "run".to_string(),
+                    "-p".to_string(),
+                    "backend".to_string(),
+                    "--".to_string(),
+                    "--database-url".to_string(),
+                    self.config_json.database_url.clone(),
+                ];
+                ("cargo".to_string(), args)
+            };
         self.procs.push(spawn_process(
             "backend",
-            "cargo",
+            &backend_cmd,
             &backend_args
                 .iter()
                 .map(|s| s.as_str())
@@ -129,16 +142,25 @@ impl Launcher {
         std::thread::sleep(Duration::from_secs(3));
         // Spawn notificator (always active, but notifications depend on config)
         let config_path_str = self.config_path.to_string_lossy().to_string();
-        let notificator_args = [
-            "run".to_string(),
-            "-p".to_string(),
-            "notificator".to_string(),
-            "--".to_string(),
-            config_path_str.clone(),
-        ];
+        let (notificator_cmd, notificator_args) =
+            if let Some(ref notificator_binary) = self.config_json.notificator_binary {
+                // Use release binary if specified
+                let args: Vec<String> = vec![config_path_str.clone()];
+                (notificator_binary.clone(), args)
+            } else {
+                // Fallback to cargo run
+                let args = vec![
+                    "run".to_string(),
+                    "-p".to_string(),
+                    "notificator".to_string(),
+                    "--".to_string(),
+                    config_path_str.clone(),
+                ];
+                ("cargo".to_string(), args)
+            };
         self.procs.push(spawn_process(
             "notificator",
-            "cargo",
+            &notificator_cmd,
             &notificator_args
                 .iter()
                 .map(|s| s.as_str())

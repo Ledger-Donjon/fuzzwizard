@@ -1,35 +1,27 @@
 <!-- SPDX-FileCopyrightText: © 2026 LEDGER SAS -->
 <!-- SPDX-License-Identifier: MIT -->
 
-# Documentation - Fichier d'état des fuzzers
+# State File Documentation
 
-Le scheduler peut utiliser un fichier JSON d'état partagé pour permettre le contrôle manuel des fuzzers sans modifier les dossiers de targets.
+The scheduler can use a shared JSON state file to allow manual control of fuzzers without modifying the target directories.
+
+## Overview
+
+The state file provides a way to:
+- Manually start, stop, or restart fuzzers
+- Control fuzzer behavior with custom environment variables and command options
+- Monitor fuzzer states (RUNNING, CRASHED, STOPPED)
+- Access container names for debugging
 
 ## Configuration
 
-Le champ `state_file` est **optionnel** dans votre configuration de scheduler :
+The `state_file` field is **optional** in your scheduler configuration, if `state_file` is not defined, the scheduler will automatically use `/tmp/{scheduler_name}_state.json` as the default path.
 
-```json
-{
-  "scheduler_name": "my_scheduler",
-  "targets_directory": ["/path/to/targets"],
-  "build_script": "/path/to/build.sh",
-  "backend_url": "http://127.0.0.1:3000",
-  "corpus_directory": "/path/to/corpus",
-  "crashes_directory": "/path/to/crashes",
-  "coverage_directory": "/path/to/coverage",
-  "has_coverage": false,
-  "state_file": "/path/to/scheduler_state.json"
-}
-```
+**On startup**: The scheduler always creates an empty state file, overwriting any existing file. This ensures a clean state on each launch.
 
-**Note importante** : Si `state_file` n'est pas défini, le scheduler utilisera automatiquement `/tmp/{scheduler_name}_state.json` comme chemin par défaut.
+## State File Format
 
-**Au démarrage** : Le scheduler crée toujours un fichier d'état vide, écrasant tout fichier existant. Cela garantit un état propre à chaque lancement.
-
-## Format du fichier d'état
-
-Le fichier d'état est un JSON avec la structure suivante :
+The state file is a JSON with the following structure:
 
 ```json
 {
@@ -60,44 +52,46 @@ Le fichier d'état est un JSON avec la structure suivante :
 }
 ```
 
-**Champs** :
-- `path` : Chemin vers le binaire du fuzzer
-- `sha` : Hash SHA3-256 du binaire (en hexadécimal)
-- `state` : État actuel du fuzzer (voir section "États possibles")
-- `container_name` : Nom du conteneur Docker/Podman si le fuzzer s'exécute dans un conteneur (optionnel, `null` si non applicable)
-- `var_env` : Variables d'environnement à définir lors du lancement du fuzzer (optionnel, `null` si non défini)
-- `cmd_options` : Options de ligne de commande supplémentaires à passer au fuzzer (optionnel, `null` si non défini)
+### Fields
 
-**Notes** :
-- Le champ `container_name` est automatiquement rempli par le scheduler pour les fuzzers qui s'exécutent dans des conteneurs. Cela permet de facilement s'attacher au conteneur avec `docker attach <container_name>` ou `docker exec -it <container_name> bash`.
-- Les champs `var_env` et `cmd_options` sont initialisés avec les valeurs par défaut lors du premier lancement, mais peuvent être modifiés dans le fichier d'état pour contrôler le comportement du fuzzer.
-- Les valeurs de `var_env` et `cmd_options` sont préservées lors des mises à jour automatiques du fichier d'état.
+- **`path`**: Path to the fuzzer binary
+- **`sha`**: SHA3-256 hash of the binary (hexadecimal)
+- **`state`**: Current state of the fuzzer (see "States" section)
+- **`container_name`**: Docker/Podman container name if fuzzer runs in a container (optional, `null` if not applicable)
+- **`var_env`**: Environment variables to set when launching the fuzzer (optional, `null` if not defined)
+- **`cmd_options`**: Additional command-line options to pass to the fuzzer (optional, `null` if not defined)
 
-## États possibles
+### Notes
 
-### Commandes utilisateur (modifiables par l'utilisateur)
+- The `container_name` field is automatically filled by the scheduler for fuzzers running in containers. This allows easy attachment with `docker attach <container_name>` or `docker exec -it <container_name> bash`.
+- The `var_env` and `cmd_options` fields are initialized with default values on first launch, but can be modified in the state file to control fuzzer behavior.
+- Values of `var_env` and `cmd_options` are preserved during automatic state file updates.
 
-- **`START`** : Démarrer un fuzzer qui est `STOPPED` ou `CRASHED`. Si le fuzzer est déjà `RUNNING`, cette commande est ignorée.
-- **`STOP`** : Arrêter le fuzzer s'il est en cours d'exécution
-- **`RESTART`** : Redémarrer un fuzzer qui est déjà `RUNNING`. Si le fuzzer est `STOPPED` ou `CRASHED`, il faut d'abord changer son état à `START` dans le fichier.
+## States
 
-### États automatiques (mis à jour par le scheduler)
+### User Commands (modifiable by user)
 
-- **`RUNNING`** : Le fuzzer est en cours d'exécution
-- **`CRASHED`** : Le fuzzer a crashé
-- **`STOPPED`** : Le fuzzer a été arrêté (état automatique après un `STOP` ou une suppression du target)
+- **`START`**: Start a fuzzer that is `STOPPED` or `CRASHED`. If the fuzzer is already `RUNNING`, this command is ignored.
+- **`STOP`**: Stop the fuzzer if it is running
+- **`RESTART`**: Restart a fuzzer that is already `RUNNING`. If the fuzzer is `STOPPED` or `CRASHED`, you must first change its state to `START` in the file.
 
-## Fonctionnement
+### Automatic States (updated by scheduler)
 
-1. **Lecture** : À chaque appel de `update()`, le scheduler lit le fichier d'état
-2. **Application** : Les commandes utilisateur (`START`, `STOPPED`, `RESTART`) sont appliquées
-3. **Mise à jour** : Le scheduler met à jour le fichier avec les états réels (`RUNNING`, `CRASHED`, `STOPPED`)
+- **`RUNNING`**: The fuzzer is running
+- **`CRASHED`**: The fuzzer has crashed
+- **`STOPPED`**: The fuzzer has been stopped (automatic state after a `STOP` or target deletion)
 
-## Exemple d'utilisation
+## How It Works
 
-### Relancer un fuzzer qui a crashé
+1. **Read**: On each `update()` call, the scheduler reads the state file
+2. **Apply**: User commands (`START`, `STOP`, `RESTART`) are applied
+3. **Update**: The scheduler updates the file with actual states (`RUNNING`, `CRASHED`, `STOPPED`)
 
-1. Éditez le fichier d'état et changez l'état à `START` :
+## Usage Examples
+
+### Restart a crashed fuzzer
+
+1. Edit the state file and change the state to `START`:
 ```json
 {
   "fuzzers": [
@@ -110,11 +104,11 @@ Le fichier d'état est un JSON avec la structure suivante :
 }
 ```
 
-2. Le scheduler détectera la commande `START` au prochain `update()` (toutes les 60 secondes par défaut) et redémarrera le fuzzer
+2. The scheduler will detect the `START` command on the next `update()` (every 60 seconds by default) and restart the fuzzer
 
-**Note** : Pour redémarrer un fuzzer qui est déjà `RUNNING`, utilisez `RESTART` au lieu de `START`.
+**Note**: To restart a fuzzer that is already `RUNNING`, use `RESTART` instead of `START`.
 
-### Arrêter un fuzzer spécifique
+### Stop a specific fuzzer
 
 ```json
 {
@@ -128,9 +122,9 @@ Le fichier d'état est un JSON avec la structure suivante :
 }
 ```
 
-**Note** : Après l'arrêt, l'état sera automatiquement mis à `STOPPED` par le scheduler.
+**Note**: After stopping, the state will be automatically set to `STOPPED` by the scheduler.
 
-### Démarrer un nouveau fuzzer avec des options personnalisées
+### Start a new fuzzer with custom options
 
 ```json
 {
@@ -153,40 +147,19 @@ Le fichier d'état est un JSON avec la structure suivante :
 }
 ```
 
-### Redémarrer un fuzzer en cours d'exécution
 
-```json
-{
-  "fuzzers": [
-    {
-      "path": "/path/to/fuzzer",
-      "sha": "a1b2c3d4...",
-      "state": "RESTART"
-    }
-  ]
-}
-```
 
-**Note** : `RESTART` ne fonctionne que pour les fuzzers qui sont déjà `RUNNING`. Pour redémarrer un fuzzer `STOPPED` ou `CRASHED`, utilisez `START`.
+## Important Notes
 
-## Gestion des erreurs
-
-- Si le fichier n'existe pas, il sera créé automatiquement
-- Si le fichier est corrompu ou illisible, le scheduler le réécrira avec les états actuels
-- Si le fichier est invalide (JSON malformé), le scheduler utilisera un état vide et réécrira le fichier
-
-## Notes importantes
-
-- Le fichier est mis à jour après chaque `update()` et après chaque `report_crashes()`
-- Les modifications utilisateur sont appliquées au prochain cycle `update()` (60 secondes par défaut)
-- Le SHA doit être en hexadécimal (64 caractères)
-- Le chemin doit correspondre exactement au chemin du binaire dans les targets
-- Le champ `container_name` est automatiquement rempli par le scheduler et permet de s'attacher facilement aux conteneurs :
+- The file is updated after each `update()` and after each `report_crashes()`
+- User modifications are applied on the next `update()` cycle (60 seconds by default)
+- The SHA must be in hexadecimal (64 characters)
+- The path must exactly match the binary path in the targets
+- The `container_name` field is automatically filled by the scheduler and allows easy container attachment:
   ```bash
   docker attach <container_name>
-  # ou
+  # or
   docker exec -it <container_name> bash
   ```
-- Les champs `var_env` et `cmd_options` sont préservés lors des mises à jour automatiques du fichier d'état. Vous pouvez les modifier dans le fichier pour contrôler le comportement du fuzzer lors du prochain démarrage.
-- Lors du premier lancement d'un fuzzer, `var_env` et `cmd_options` sont `null` et les valeurs par défaut du scheduler sont utilisées. Après le premier lancement, ces valeurs sont préservées dans le fichier d'état.
-
+- The `var_env` and `cmd_options` fields are preserved during automatic state file updates. You can modify them in the file to control fuzzer behavior on the next startup.
+- On first launch of a fuzzer, `var_env` and `cmd_options` are `null` and default scheduler values are used. After the first launch, these values are preserved in the state file.

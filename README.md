@@ -3,26 +3,29 @@
 
 # fuzzwizard
 
-Scheduler and triager for 24/7 fuzzing
+Scheduler and triager for 24/7 fuzzing.
 
-This repository is composed by several components:
-- scheduler : it is a library which allow to collect target to fuzz and check if there is any updates in these targets to update them. When a crash is detected it is send to the backup.
-A simple working example of a scheduler is provided in main.rs.
-It could be configured with a config file which is expected as a parameter. An example is given in tests/test_targets.
-It contains, in particular :
-    - the directory where the taregts are expected
-    - the location of the script file needed to build the target
-- backend : a backend which allow to interact with the DB to upload and analyse crashes
-- notificator: component which sends alerts (Slack, file, etc.) when a new crash occurred
+## Overview
 
-Each of the previous component could be started independently
-But a last component, the launcher has been created to start all the process in the same time and add additionnal monitoring the the components.
-It could take a configuration file path in argument otherwise it will take the one included in fuzzwizzard.
-In this configuration file you could set the scheduler and scheduler_config path in order to start fuzzwizzard using the scheduler library.
+Fuzzwizard is a continuous fuzzing system that automatically manages fuzzing tasks, detects crashes, and sends notifications. It consists of:
 
-## Installation
-Setup database
-```
+- **scheduler**: Library to collect and manage fuzzing targets, detect updates, and send crashes to the backend
+- **backend**: REST API to store and analyze crashes in PostgreSQL
+- **notificator**: Sends alerts (Slack, file, etc.) when new crashes are detected
+- **fuzztui**: Terminal UI to monitor and manage all components
+
+## Quick Start
+
+### Prerequisites
+
+- Rust (latest stable)
+- PostgreSQL
+- Docker/Podman (for database setup)
+
+### Installation
+
+1. Setup the database:
+```bash
 cd backend
 cargo install diesel_cli --no-default-features --features postgres
 docker compose up
@@ -30,70 +33,36 @@ export DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/fuzzwizard
 diesel setup
 ```
 
-## Environment variables
-
-### backend
-- DATABASE_URL: PostgreSQL connection string (e.g. `postgres://user:pass@localhost:5432/fuzzwizard`)
-
-
-# Run:
+2. Run the launcher:
 ```bash
-RUST_LOG=info cargo run -p launcher
+RUST_LOG=info cargo run -p fuzztui -- config.json
 ```
 
-What it does:
-- Checks required env vars are set
-- Prompts for a targets directory (used by the scheduler to watch and run targets)
-- Launches backend and notificator
-- Monitors processes, sends a Slack alert if a process exits
-- Displays running scheduler-driven processes and their uptime
+The launcher will start all components (backend, notificator, schedulers) and provide a TUI interface for monitoring.
 
+See [doc/install.md](doc/install.md) for complete installation documentation.
 
-Questions pour demain: 
-* pour le coverage; est ce qu'on l'intégre directement dans les projets ou est ce qu'on l'integre dans le patch 
-* Gérer le rapport de coverage
-* Docker de debug ? 
-* Améliorer dossier de config
-* Ajouter un log quand on lance un nouveau fuzzer avec son hash
-* Ajouter un scheduler pour le V
+## Configuration
 
-DONE: 
-* multiple scheduler or multiple directory avec un level de priorité
-* slack configuration
-* Add random init file in corpus directory 
-* Faire un patch avec le token en $ENV
-* Regler le probleme de CORPUS
+See [doc/config.md](doc/config.md) for complete configuration documentation.
+
+## Environment Variables
+
+- `DATABASE_URL`: PostgreSQL connection string (e.g. `postgres://user:pass@localhost:5432/fuzzwizard`)
+
+## Documentation
+
+Complete documentation is available in the [doc/](doc/) directory:
+
+- [Installation Guide](doc/install.md)
+- [Configuration](doc/config.md)
+- [FuzzTUI](doc/fuzztui.md)
+- [Backend API](doc/backend.md)
+- [Scheduler](doc/scheduler.md)
+- [Notificator](doc/notificator.md)
 
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
-All source files in this repository include SPDX license identifiers in accordance with the [REUSE Specification](https://reuse.software/spec/). Each file contains:
-- `SPDX-FileCopyrightText`: Copyright information
-- `SPDX-License-Identifier`: MIT license identifier
-
-## Third-Party Open Source Software
-
-This project uses several open source dependencies. The main dependencies and their licenses are:
-
-### Rust Dependencies
-
-The project uses Rust crates managed through Cargo. You can view all dependencies and their licenses by running:
-
-```bash
-cargo license
-```
-
-Key dependencies include:
-- **axum**: Web framework (MIT)
-- **diesel**: SQL ORM (MIT/Apache-2.0)
-- **tokio**: Async runtime (MIT)
-- **serde**: Serialization framework (MIT/Apache-2.0)
-- **ratatui**: Terminal UI library (MIT)
-- **chrono**: Date and time library (MIT/Apache-2.0)
-
-For a complete list of all dependencies and their licenses, please refer to the `Cargo.toml` files in each component directory or run `cargo license` in the project root.
-
-All third-party dependencies are used in accordance with their respective licenses. We are committed to respecting open source licenses and maintaining compliance with all applicable license terms.
-
-
+All source files include SPDX license identifiers in accordance with the [REUSE Specification](https://reuse.software/spec/).
