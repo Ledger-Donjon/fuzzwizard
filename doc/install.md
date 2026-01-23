@@ -16,13 +16,12 @@ This guide covers the installation and setup of Fuzzwizard, including all depend
 
 ### Required Tools
 
-1. **Build Tools** (Linux only - required for compiling Rust dependencies)
-   - **Ubuntu/Debian**: Install build-essential, pkg-config, and PostgreSQL development libraries
+1. **Build Tools** 
+   - **Ubuntu/Debian**: 
      ```bash
-     sudo apt-get update
-     sudo apt-get install build-essential pkg-config libssl-dev libpq-dev
+     sudo apt install build-essential pkg-config libssl-dev libpq-dev
      ```
-     **Note**: `libpq-dev` is required for compiling `diesel_cli` with PostgreSQL support.
+    
    - **macOS**: Xcode Command Line Tools are usually installed automatically with Homebrew or Rust
      - If needed: `xcode-select --install`
      - PostgreSQL development libraries are included when installing PostgreSQL via Homebrew
@@ -35,24 +34,20 @@ This guide covers the installation and setup of Fuzzwizard, including all depend
    - **Option 1**: Install PostgreSQL locally
      ```bash
      # Ubuntu/Debian
-     sudo apt-get install postgresql postgresql-contrib
+     sudo apt install postgresql postgresql-contrib
      
      # macOS (Homebrew)
      brew install postgresql
      ```
    - **Option 2**: Use Docker Compose (recommended for development)
      - A `docker-compose.yml` file is provided in the `backend/` directory
-     - Requires Docker installed
-     - Verify installation:
-       - Docker: `docker --version`
-       - Docker Compose: `docker compose version` or `docker-compose --version`
      - See "Set Up the Database" section below for the command to start PostgreSQL
 
 4. **Diesel CLI** (for database migrations)
    ```bash
    cargo install diesel_cli --no-default-features --features postgres
    ```
-   **Note**: On Linux, make sure you have installed the build tools including `libpq-dev` (see step 1 above) before running this command, as `diesel_cli` requires a C compiler and PostgreSQL development libraries to build native dependencies.
+
 
 5. **Docker or Podman** (optional, for containerized fuzzing)
    - Docker: Install from [docker.com](https://www.docker.com/)
@@ -66,8 +61,6 @@ This guide covers the installation and setup of Fuzzwizard, including all depend
 ## Installation Steps
 
 ### Part 1: Setup
-
-This section covers the basic installation and database setup.
 
 #### 1. Clone the Repository
 
@@ -88,7 +81,6 @@ This will compile all components:
 - `notificator`: Notification service
 - `scheduler`: Fuzzer scheduler library
 
-**Note**: After building, you can configure FuzzTUI to use the release binaries directly by setting `backend_binary` and `notificator_binary` in your `config.json` (see [config.md](config.md) for details). This is recommended for production use as it provides better performance and stability.
 
 #### 3. Set Up the Database
 
@@ -98,7 +90,7 @@ A `docker-compose.yml` file is provided in the `backend/` directory for easy Pos
 
 ```bash
 cd backend
-docker compose up -d
+docker-compose up -d
 ```
 
 This starts a PostgreSQL container with:
@@ -136,8 +128,6 @@ diesel setup
 This creates all necessary database tables:
 - `crashes`: Stores crash reports
 - `admin_events`: Stores administrative events
-
-**Note**: The `DATABASE_URL` environment variable is only needed for running migrations. For normal operation, the database URL is configured in `config.json` (see Configuration section below).
 
 ### Part 2: Configuration
 

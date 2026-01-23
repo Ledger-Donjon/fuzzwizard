@@ -223,34 +223,10 @@ impl Launcher {
         }
     }
 
-    /// Update the status of all subprocesses and schedulers.
-    /// This function should be called periodically—callers should check the value of
-    /// self.last_config_update and only call this if enough time has elapsed.
-    pub fn update_status(&mut self) {
-        // Reload config file if it changed, and update self.config_json
-        self.update_proc_status();
-
-        // Update info string, targets, coverage, and crash report for each scheduler
-        for sched_proc in &mut self.scheduler_processes {
-            // Optionally: re-build targets if configuration changed (non-blocking)
-            // The build happens in background, we update last_build_at optimistically
-            let build_result = build_targets(
-                sched_proc.config.clone(),
-                sched_proc.last_build_at,
-                &self.backend_url,
-            );
-            if let Some(build_time) = build_result {
-                sched_proc.last_build_at = Some(build_time);
-            }
-
-            let _ = sched_proc.scheduler.report_crashes();
-            sched_proc.scheduler.collect_coverage();
-
-            let _update = sched_proc
-                .scheduler
-                .update(self.config_json.logdir.clone().as_str());
-        }
-
+    /// Reload the main config file manually.
+    /// This performs the same config reload logic as update_status but without
+    /// updating scheduler status or other background tasks.
+    pub fn reload_config(&mut self) {
         let config_file = match std::fs::read_to_string(&self.config_path) {
             Ok(contents) => contents,
             Err(e) => {
@@ -321,6 +297,11 @@ impl Launcher {
                     sched_proc.last_build_at = last_build_at;
                     sched_proc.status = ProcessStatus::Running;
                     sched_proc.info = format!("Scheduler '{}' is active", sched_proc.name.clone());
+
+                    info!("Old Scheduler {} updated", sched_proc.name);
+                    let _update = sched_proc
+                        .scheduler
+                        .update(self.config_json.logdir.clone().as_str());
                 }
             }
             let already_running = self
@@ -341,11 +322,47 @@ impl Launcher {
                     config,
                     last_build_at,
                 );
+                info!("New scheduler updated: {}", scheduler.name);
                 let _update = new_scheduler
                     .scheduler
                     .update(self.config_json.logdir.clone().as_str());
                 self.scheduler_processes.push(new_scheduler);
             }
+        }
+    }
+
+    /// Update the status of all subprocesses and schedulers.
+    /// This function should be called periodically—callers should check the value of
+    /// self.last_config_update and only call this if enough time has elapsed.
+    pub fn update_status(&mut self) {
+        // Reload config file if it changed, and update self.config_json
+        self.update_proc_status();
+
+        // Update info string, targets, coverage, and crash report for each scheduler
+        // Only update schedulers that are running
+        for sched_proc in &mut self.scheduler_processes {
+            // Skip update if scheduler is stopped
+            if matches!(sched_proc.status, ProcessStatus::Stopped) {
+                continue;
+            }
+
+            // Optionally: re-build targets if configuration changed (non-blocking)
+            // The build happens in background, we update last_build_at optimistically
+            let build_result = build_targets(
+                sched_proc.config.clone(),
+                sched_proc.last_build_at,
+                &self.backend_url,
+            );
+            if let Some(build_time) = build_result {
+                sched_proc.last_build_at = Some(build_time);
+            }
+
+            let _ = sched_proc.scheduler.report_crashes();
+            sched_proc.scheduler.collect_coverage();
+
+            let _update = sched_proc
+                .scheduler
+                .update(self.config_json.logdir.clone().as_str());
         }
     }
 

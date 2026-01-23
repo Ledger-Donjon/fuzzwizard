@@ -52,7 +52,7 @@ The scheduler is a Rust library that manages the lifecycle of fuzzing tasks. It:
          │    └───────────────────┘
          │
          └──► ┌────────────┐
-              │ State File │ ──► JSON control (START/STOP/RESTART)
+              │ State File │ ──► JSON logging and control (RUNNING/CRASHED/STOPPED)
               └────────────┘
 ```
 

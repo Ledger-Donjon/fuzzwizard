@@ -62,10 +62,13 @@ The launcher manages the lifecycle of all processes:
 
 The user interface displays:
 - **Processes tab**: Status of all managed processes
+  - Launcher processes (backend, notificator)
+  - Scheduler processes with status and uptime
+  - Recent crashes (last 10)
 - **Scheduler tabs**: One tab per scheduler showing:
-  - Scheduler status and uptime
-  - Running fuzzing tasks with binary hash and status
-- **Recent crashes**: Last 10 crashes with ID, filename, scheduler, and date
+  - Scheduler information (name, status, info, state file path)
+  - Task table with columns: SHA, FileName, Status, StatusTime
+  - Task management menu (when scheduler is running)
 
 ### Threads
 
@@ -91,9 +94,33 @@ cargo run -p fuzztui -- config.json
 
 ## Keyboard Controls
 
-- **Q**: Quit
-- **Left/Right**: Navigate tabs
-- **Up/Down**: Scroll content
+### Global Controls
+- **Q**: Quit the application
+- **Left/Right**: Navigate between tabs
+- **C**: Reload configuration (with confirmation prompt)
+
+### Processes Tab
+- **Up/Down**: Scroll through the content
+
+### Scheduler Tabs
+- **Up/Down**: Navigate through tasks in the table
+- **M**: Open task management menu (only when scheduler is running)
+  - **Up/Down**: Navigate menu options
+  - **Enter**: Execute selected action
+  - **Esc** or **M**: Close menu
+
+### Task Management Menu
+
+When a task is selected and the scheduler is running, pressing **M** opens a context menu with available actions:
+
+- **If task is RUNNING**:
+  - **STOP**: Stop the running task
+  - **RESTART**: Restart the task
+
+- **If task is STOPPED or CRASHED**:
+  - **START**: Start the task
+
+**Note**: If the scheduler is stopped, the interface is dimmed and task management is disabled. Navigation (Up/Down) still works to view tasks, but no interactions are possible.
 
 ## See Also
 

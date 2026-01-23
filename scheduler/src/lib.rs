@@ -63,19 +63,15 @@ pub struct SchedulerConfig {
 }
 
 /// Represents the state of a single fuzzer in the state file
+/// The state file is now only used for logging, not for commands.
+/// Commands (START, STOP, RESTART) are handled directly via the TUI.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum FuzzerStateCommand {
-    /// User command to start the fuzzer
-    START,
-    /// User command to stop the fuzzer
-    STOP,
-    /// User command to restart the fuzzer
-    RESTART,
-    /// Automatic state: fuzzer is running
+    /// Automatic state: fuzzer is running (used for logging)
     RUNNING,
-    /// Automatic state: fuzzer has crashed
+    /// Automatic state: fuzzer has crashed (used for logging)
     CRASHED,
-    /// Automatic state: fuzzer has been stopped
+    /// Automatic state: fuzzer has been stopped (used for logging)
     STOPPED,
 }
 
@@ -439,6 +435,7 @@ struct ProcessRecord {
     pid: u32,
     container_name: Option<String>,
     fuzzer_name: String,
+    scheduler_name: String,
 }
 
 /// Status of a task
@@ -743,6 +740,49 @@ impl<C: TargetsCollector> Scheduler<C> {
     }
 
     /// Read the state file and return the state entries
+    /// Get var_env and cmd_options for a task from the state file
+    fn get_task_options_from_state_file(
+        &self,
+        sha: Sha,
+    ) -> Result<(Option<HashMap<String, String>>, Option<Vec<String>>)> {
+        let sha_str = hex::encode(sha);
+        if let Some(state_file) = self.read_state_file()? {
+            for entry in &state_file.fuzzers {
+                if entry.sha == sha_str {
+                    return Ok((
+                        entry.var_env.clone(),
+                        entry.cmd_options.clone(),
+                    ));
+                }
+            }
+        }
+        // No entry found, return None for both
+        Ok((None, None))
+    }
+
+    /// Internal helper to start a task by SHA with options from state file
+    /// Returns the task path for logging purposes
+    fn start_task_with_state_file_options(&mut self, sha: Sha) -> Result<PathBuf> {
+        // Find the path for this SHA
+        let path = self.targets.get(&sha).ok_or_else(|| {
+            SchedulerError::InvalidInput("Task not found in targets".to_string())
+        })?;
+        
+        let fuzzer_path = path.canonicalize()?;
+        let task_path = fuzzer_path.clone();
+        
+        // Read var_env and cmd_options from state file if available
+        let (var_env, cmd_options) = self.get_task_options_from_state_file(sha)?;
+        
+        let task = self.start_task(fuzzer_path, sha, var_env.as_ref(), cmd_options.as_ref())?;
+        self.tasks.insert(sha, task);
+        
+        // Update state file
+        let _ = self.write_state_file();
+        
+        Ok(task_path)
+    }
+
     fn read_state_file(&self) -> Result<Option<StateFile>> {
         let Some(ref state_path) = self.state_file_path else {
             return Ok(None);
@@ -834,7 +874,8 @@ impl<C: TargetsCollector> Scheduler<C> {
     }
 
     /// Write the state file with current fuzzer states
-    fn write_state_file(&self) -> Result<()> {
+    /// Only updates the file if there are actual changes
+    pub fn write_state_file(&self) -> Result<()> {
         let Some(ref state_path) = self.state_file_path else {
             return Ok(());
         };
@@ -912,141 +953,6 @@ impl<C: TargetsCollector> Scheduler<C> {
         Ok(())
     }
 
-    /// Apply user commands from the state file
-    fn apply_state_file_commands(&mut self, state_file: &StateFile, logdir: &str) -> Result<()> {
-        // Create a map of SHA -> entry for quick lookup
-        let mut entries: HashMap<String, &FuzzerStateEntry> = HashMap::new();
-        for entry in &state_file.fuzzers {
-            entries.insert(entry.sha.clone(), entry);
-        }
-
-        // Process each command
-        for (sha_str, entry) in &entries {
-            // Parse SHA from hex string
-            let sha_bytes = match hex::decode(sha_str) {
-                Ok(bytes) if bytes.len() == 32 => {
-                    let mut sha: Sha = [0u8; 32];
-                    sha.copy_from_slice(&bytes);
-                    sha
-                }
-                _ => {
-                    info!("Invalid SHA in state file: {}", sha_str);
-                    continue;
-                }
-            };
-            match entry.state {
-                FuzzerStateCommand::START => {
-                    // Start the fuzzer if it's STOPPED or CRASHED (not RUNNING)
-                    let should_start = if let Some(task) = self.tasks.get(&sha_bytes) {
-                        task.status != TaskStatus::Running
-                    } else {
-                        true // Not in tasks, so we should start it
-                    };
-
-                    if should_start {
-                        // Find the path for this SHA
-                        if let Some(path) = self.targets.get(&sha_bytes) {
-                            info!(
-                                "Starting fuzzer from state file: {} (0x{})",
-                                path.display(),
-                                sha_str
-                            );
-                            let fuzzer_path = path.canonicalize()?;
-                            let var_env = entry.var_env.as_ref();
-                            let cmd_options = entry.cmd_options.as_ref();
-                            let task =
-                                self.start_task(fuzzer_path, sha_bytes, var_env, cmd_options)?;
-                            self.tasks.insert(sha_bytes, task);
-                            let mut logfile = fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(format!("{}/running_tasks.log", logdir))?;
-                            let current_date = Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
-                            writeln!(
-                                logfile,
-                                "[{}]{} : 0x{}",
-                                current_date,
-                                path.display(),
-                                sha_str
-                            )?;
-                        }
-                    }
-                }
-                FuzzerStateCommand::STOP => {
-                    // Stop the fuzzer if it's running
-                    if let Some(task) = self.tasks.get(&sha_bytes) {
-                        if task.status == TaskStatus::Running {
-                            info!("Stopping fuzzer from state file: 0x{}", sha_str);
-                            if let Some(mut task) = self.tasks.remove(&sha_bytes) {
-                                self.kill_task(&mut task);
-                                task.status = TaskStatus::Stopped;
-                                task.stopped_at = Some(Instant::now());
-                                self.tasks.insert(sha_bytes, task);
-                            }
-                        }
-                    }
-                }
-                FuzzerStateCommand::STOPPED => {
-                    // This is an automatic state, not a user command, so we ignore it
-                }
-                FuzzerStateCommand::RESTART => {
-                    // Restart the fuzzer if it's already RUNNING
-                    // If it's STOPPED or CRASHED, we need to change state to START first
-                    if let Some(task) = self.tasks.get(&sha_bytes) {
-                        if task.status == TaskStatus::Running {
-                            // Restart a running fuzzer
-                            info!("Restarting running fuzzer from state file: 0x{}", sha_str);
-                            if let Some(mut task) = self.tasks.remove(&sha_bytes) {
-                                self.kill_task(&mut task);
-                                if let Some(path) = self.targets.get(&sha_bytes) {
-                                    let fuzzer_path = path.canonicalize()?;
-                                    let var_env = entry.var_env.as_ref();
-                                    let cmd_options = entry.cmd_options.as_ref();
-                                    let new_task = self.start_task(
-                                        fuzzer_path,
-                                        sha_bytes,
-                                        var_env,
-                                        cmd_options,
-                                    )?;
-                                    self.tasks.insert(sha_bytes, new_task);
-                                    let mut logfile = fs::OpenOptions::new()
-                                        .create(true)
-                                        .append(true)
-                                        .open(format!("{}/running_tasks.log", logdir))?;
-                                    let current_date =
-                                        Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
-                                    writeln!(
-                                        logfile,
-                                        "[{}]{} : 0x{} (restarted)",
-                                        current_date,
-                                        path.display(),
-                                        sha_str
-                                    )?;
-                                }
-                            }
-                        } else {
-                            // Fuzzer is STOPPED or CRASHED, need to change state to START first
-                            info!(
-                                "RESTART requested for STOPPED/CRASHED fuzzer 0x{}, but state must be changed to START first",
-                                sha_str
-                            );
-                        }
-                    } else {
-                        // Fuzzer not in tasks, need to change state to START first
-                        info!(
-                            "RESTART requested for non-existent fuzzer 0x{}, but state must be changed to START first",
-                            sha_str
-                        );
-                    }
-                }
-                FuzzerStateCommand::RUNNING | FuzzerStateCommand::CRASHED => {
-                    // These are automatic states, not user commands, so we ignore them
-                }
-            }
-        }
-
-        Ok(())
-    }
     fn kill_task(&mut self, task: &mut Task) {
         if let Some(ref container_name) = task.container_name {
             if let Some(ref binary) = self.container_binary {
@@ -1062,10 +968,8 @@ impl<C: TargetsCollector> Scheduler<C> {
 
     /// Update the scheduler with the latest targets collected by the collector.
     pub fn update(&mut self, logdir: &str) -> Result<()> {
-        // Read and apply user commands from state file if it exists
-        if let Some(state_file) = self.read_state_file()? {
-            self.apply_state_file_commands(&state_file, logdir)?;
-        }
+        // State file is now only used for logging, not for commands
+        // Commands are handled directly via the TUI
 
         let latest_targets = self.collector.collect_targets();
 
@@ -1088,42 +992,29 @@ impl<C: TargetsCollector> Scheduler<C> {
             .copied()
             .collect();
 
-        // Display paths of all targets_to_stop elements
-        info!("targets_to_stop (paths):");
-        for sha in &targets_to_stop {
-            if let Some(path) = self.targets.get(sha) {
-                info!("- STOP: {} : {:?}", hex::encode(sha), path.display());
-            } else {
-                info!("- STOP: {} : [missing path]", hex::encode(sha));
+        // Helper function to log target paths
+        let log_targets = |label: &str, shas: &[Sha], targets_map: &HashMap<Sha, PathBuf>| {
+            info!("{} (paths):", label);
+            for sha in shas {
+                if let Some(path) = targets_map.get(sha) {
+                    info!("- {}: {} : {:?}", label, hex::encode(sha), path.display());
+                } else {
+                    info!("- {}: {} : [missing path]", label, hex::encode(sha));
+                }
             }
-        }
+        };
 
-        // Display paths of all targets_to_check elements
-        info!("targets_to_check (paths):");
-        for sha in &targets_to_check {
-            // self.targets is the old one, latest_targets is the new one
-            if let Some(path) = self.targets.get(sha) {
-                info!("- CHECK: {} : {:?}", hex::encode(sha), path.display());
-            } else {
-                info!("- CHECK: {} : [missing path]", hex::encode(sha));
-            }
-        }
-
-        // Display paths of all targets_to_start elements
-        info!("targets_to_start (paths):");
-        for sha in &targets_to_start {
-            if let Some(path) = latest_targets.get(sha) {
-                info!("- START: {} : {:?}", hex::encode(sha), path.display());
-            } else {
-                info!("- START: {} : [missing path]", hex::encode(sha));
-            }
-        }
+        log_targets("STOP", &targets_to_stop, &self.targets);
+        log_targets("CHECK", &targets_to_check, &self.targets);
+        log_targets("START", &targets_to_start, &latest_targets);
 
         for target in targets_to_stop {
             info!("stopping task: {:x?}", target);
             if let Some(mut task) = self.tasks.remove(&target) {
                 self.kill_task(&mut task);
                 info!("removing task: {:?}", target);
+                // Task removed, update state file
+                let _ = self.write_state_file();
             } else {
                 return Err(SchedulerError::InconsistentState(
                     "task missing during stop",
@@ -1142,8 +1033,10 @@ impl<C: TargetsCollector> Scheduler<C> {
                     "missing start target path",
                 ));
             };
+            // Read var_env and cmd_options from state file if available
+            let (var_env, cmd_options) = self.get_task_options_from_state_file(target)?;
             let fuzzer_path = path.canonicalize()?;
-            let task = self.start_task(fuzzer_path, target, None, None)?;
+            let task = self.start_task(fuzzer_path, target, var_env.as_ref(), cmd_options.as_ref())?;
             self.tasks.insert(target, task);
             let current_date = Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
             writeln!(
@@ -1153,6 +1046,8 @@ impl<C: TargetsCollector> Scheduler<C> {
                 path.display(),
                 hex::encode(target)
             )?;
+            // Task added, update state file
+            let _ = self.write_state_file();
         }
 
         for target in targets_to_check {
@@ -1173,16 +1068,21 @@ impl<C: TargetsCollector> Scheduler<C> {
                     "missing restart target path",
                 ));
             };
+            // For restart, we don't need to log to running_tasks.log again
+            // Read var_env and cmd_options from state file if available
+            let (var_env, cmd_options) = self.get_task_options_from_state_file(target)?;
             let fuzzer_path = path.canonicalize()?;
-            let task = self.start_task(fuzzer_path, target, None, None)?;
+            let task = self.start_task(fuzzer_path, target, var_env.as_ref(), cmd_options.as_ref())?;
             // Replace the stopped task with the new running one
             self.tasks.insert(target, task);
+            // Task restarted, update state file
+            let _ = self.write_state_file();
         }
 
         self.targets = latest_targets;
 
-        // Write the state file with current states
-        self.write_state_file()?;
+        // State file is updated only when tasks are added/removed/status changes
+        // (handled in the loops above and in other methods)
         Ok(())
     }
 
@@ -1313,6 +1213,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                             pid: child.id(),
                             container_name: Some(name.clone()),
                             fuzzer_name: fuzzer_name.to_string(),
+                            scheduler_name: self.scheduler_name.clone(),
                         });
                     }
                 }
@@ -1373,6 +1274,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                         pid: child.id(),
                         container_name: None,
                         fuzzer_name: fuzzer_name.to_string(),
+                        scheduler_name: self.scheduler_name.clone(),
                     });
                 }
             }
@@ -1407,12 +1309,13 @@ impl<C: TargetsCollector> Scheduler<C> {
     }
 
     pub fn kill_tasks(&mut self) {
+        info!("Killing tasks for scheduler: {}", self.scheduler_name);
         let registry = PROCESS_REGISTRY
             .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
             .clone();
 
         // Extract data quickly and release the lock
-        let records: Vec<ProcessRecord> = {
+        let all_records: Vec<ProcessRecord> = {
             match registry.lock() {
                 Ok(guard) => guard.clone(),
                 Err(e) => {
@@ -1423,9 +1326,15 @@ impl<C: TargetsCollector> Scheduler<C> {
         };
         // Lock is released here
 
+        // Filter records to only include those from this scheduler
+        let records: Vec<ProcessRecord> = all_records
+            .into_iter()
+            .filter(|rec| rec.scheduler_name == self.scheduler_name)
+            .collect();
+
         // Process records without holding the lock
         for rec in records.iter() {
-            info!("Killing task: {:?}", rec.fuzzer_name);
+            info!("Killing task: {:?} (scheduler: {})", rec.fuzzer_name, rec.scheduler_name);
             if let Some(name) = &rec.container_name {
                 if let Some(ref binary) = self.container_binary {
                     // Use helper function to remove container
@@ -1435,9 +1344,32 @@ impl<C: TargetsCollector> Scheduler<C> {
             // Use helper function to kill process
             kill_process_by_pid(rec.pid);
         }
+
+        // Remove killed records from registry
+        if let Some(reg) = PROCESS_REGISTRY.get() {
+            if let Ok(mut guard) = reg.lock() {
+                guard.retain(|rec| rec.scheduler_name != self.scheduler_name);
+            }
+        }
+
+        // Update task statuses: set Running tasks to Stopped (don't change Crashed or Stopped tasks)
+        let mut status_changed = false;
+        for (_sha, task) in self.tasks.iter_mut() {
+            if task.status == TaskStatus::Running {
+                task.status = TaskStatus::Stopped;
+                task.stopped_at = Some(Instant::now());
+                info!("Task {:?} marked as Stopped", task.path);
+                status_changed = true;
+            }
+        }
+        // Update state file if any task status changed
+        if status_changed {
+            let _ = self.write_state_file();
+        }
     }
 
     pub fn report_crashes(&mut self) -> Result<()> {
+        let mut crashed_tasks = Vec::new();
         for (_hash, task) in self.tasks.iter_mut() {
             // Only check tasks that are still running
             if task.status != TaskStatus::Running {
@@ -1453,6 +1385,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                     // Task has exited - mark as crashed and report it
                     task.status = TaskStatus::Crashed;
                     task.crashed_at = Some(Instant::now());
+                    crashed_tasks.push(true);
 
                     let mut stderr = String::new();
                     task.stderr.read_to_string(&mut stderr)?;
@@ -1528,7 +1461,12 @@ impl<C: TargetsCollector> Scheduler<C> {
                 Err(e) => return Err(SchedulerError::Io(e)),
             }
         }
-        // Update state file after checking for crashes
+        
+        // Update state file if any task crashed
+        if !crashed_tasks.is_empty() {
+            let _ = self.write_state_file();
+        }
+        
         Ok(())
     }
 
@@ -1627,6 +1565,63 @@ impl<C: TargetsCollector> Scheduler<C> {
                 }
             }
         }
+    }
+
+    /// Start a task by SHA. Returns Ok(()) if successful, Err if task not found or already running.
+    /// Reads var_env and cmd_options from state file if available.
+    pub fn start_task_by_sha(&mut self, sha: Sha) -> Result<()> {
+        // Check if task exists and is not running
+        if let Some(task) = self.tasks.get(&sha) {
+            if task.status == TaskStatus::Running {
+                return Err(SchedulerError::InvalidInput(
+                    "Task is already running".to_string(),
+                ));
+            }
+        }
+
+        let task_path = self.start_task_with_state_file_options(sha)?;
+        info!("Task started: {:?}", task_path);
+        Ok(())
+    }
+
+    /// Stop a task by SHA. Returns Ok(()) if successful, Err if task not found or not running.
+    pub fn stop_task_by_sha(&mut self, sha: Sha) -> Result<()> {
+        if let Some(mut task) = self.tasks.remove(&sha) {
+            if task.status == TaskStatus::Running {
+                let task_path = task.path.clone();
+                self.kill_task(&mut task);
+                task.status = TaskStatus::Stopped;
+                task.stopped_at = Some(Instant::now());
+                self.tasks.insert(sha, task);
+                info!("Task stopped: {:?}", task_path);
+                // Task stopped, update state file
+                let _ = self.write_state_file();
+                Ok(())
+            } else {
+                // Task is not running, just reinsert it
+                self.tasks.insert(sha, task);
+                Err(SchedulerError::InvalidInput(
+                    "Task is not running".to_string(),
+                ))
+            }
+        } else {
+            Err(SchedulerError::InvalidInput("Task not found".to_string()))
+        }
+    }
+
+    /// Restart a task by SHA. Returns Ok(()) if successful, Err if task not found.
+    pub fn restart_task_by_sha(&mut self, sha: Sha) -> Result<()> {
+        // Kill the task if it exists and is running
+        if let Some(mut task) = self.tasks.remove(&sha) {
+            if task.status == TaskStatus::Running {
+                self.kill_task(&mut task);
+            }
+        }
+
+        // Start the task (or restart if it was removed above)
+        let task_path = self.start_task_with_state_file_options(sha)?;
+        info!("Task restarted: {:?}", task_path.display());
+        Ok(())
     }
 
     pub fn collect_coverage(&self) {

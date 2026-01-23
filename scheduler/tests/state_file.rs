@@ -157,24 +157,15 @@ fn test_state_file_write_and_read() {
 
     let mut scheduler = Scheduler::new(collector, config, None);
 
-    // Write state file manually to test START command
-    let sha_str = hex::encode(sha);
-    let state_file = StateFile {
-        fuzzers: vec![FuzzerStateEntry {
-            path: test_file.path().display().to_string(),
-            sha: sha_str.clone(),
-            state: FuzzerStateCommand::START,
-            container_name: None,
-            var_env: None,
-            cmd_options: None,
-        }],
-    };
-
-    let json = serde_json::to_string_pretty(&state_file).unwrap();
-    fs::write(&state_file_path, json).unwrap();
-
-    // Update should read and apply the START command
+    // Start a task using the public method (state file is now only for logging)
+    let result = scheduler.start_task_by_sha(sha);
     // Note: This might fail if the binary is not executable, but we test the state file mechanism
+    if result.is_err() {
+        // If start failed, we can't test state file logging, so skip
+        return;
+    }
+
+    // Update should write the current state to the state file
     let _ = scheduler.update(log_dir.to_str().unwrap());
 
     // Verify state file was updated
@@ -246,25 +237,13 @@ done
         return;
     }
 
-    // Now write STOP command to state file
-    let sha_str = hex::encode(sha);
-    let state_file = StateFile {
-        fuzzers: vec![FuzzerStateEntry {
-            path: test_file.path().display().to_string(),
-            sha: sha_str.clone(),
-            state: FuzzerStateCommand::STOP,
-            container_name: None,
-            var_env: None,
-            cmd_options: None,
-        }],
-    };
+    // Stop the task using the public method (state file is now only for logging)
+    let result = scheduler.stop_task_by_sha(sha);
+    assert!(result.is_ok(), "stop_task_by_sha should succeed");
 
-    let json = serde_json::to_string_pretty(&state_file).unwrap();
-    fs::write(&state_file_path, json).unwrap();
-
-    // Update should read and apply the STOP command
+    // Update should write the current state to the state file
     let result = scheduler.update(log_dir.to_str().unwrap());
-    assert!(result.is_ok(), "update with STOP command should succeed");
+    assert!(result.is_ok(), "update after STOP should succeed");
 }
 
 #[test]
@@ -301,16 +280,21 @@ fn test_state_file_with_env_and_options() {
 
     let mut scheduler = Scheduler::new(collector, config, None);
 
-    // Write state file with environment variables and command options
+    // Start a task first, then manually write state file with environment variables and command options
+    // to test that they are preserved
     let sha_str = hex::encode(sha);
     let mut var_env = HashMap::new();
     var_env.insert("TEST_VAR".to_string(), "test_value".to_string());
 
+    // Start task (might fail if binary is not executable)
+    let _ = scheduler.start_task_by_sha(sha);
+
+    // Manually write state file with var_env and cmd_options to test preservation
     let state_file = StateFile {
         fuzzers: vec![FuzzerStateEntry {
             path: test_file.path().display().to_string(),
             sha: sha_str.clone(),
-            state: FuzzerStateCommand::START,
+            state: FuzzerStateCommand::RUNNING, // Use RUNNING since START no longer exists
             container_name: None,
             var_env: Some(var_env),
             cmd_options: Some(vec!["-option1".to_string(), "value1".to_string()]),

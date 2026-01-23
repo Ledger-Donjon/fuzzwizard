@@ -3,15 +3,20 @@
 
 # State File Documentation
 
-The scheduler can use a shared JSON state file to allow manual control of fuzzers without modifying the target directories.
+The scheduler uses a JSON state file to log the current state of all fuzzing tasks. The state file is automatically updated by the scheduler when task status changes.
 
 ## Overview
 
 The state file provides a way to:
-- Manually start, stop, or restart fuzzers
-- Control fuzzer behavior with custom environment variables and command options
 - Monitor fuzzer states (RUNNING, CRASHED, STOPPED)
 - Access container names for debugging
+- Configure environment variables (`var_env`) and command options (`cmd_options`) for each fuzzer
+- View environment variables and command options used for each fuzzer
+
+**Note**: 
+- Task control (START/STOP/RESTART) is handled directly through the TUI interface. See [fuzztui.md](fuzztui.md) for details.
+- The `state` field is read-only and automatically updated by the scheduler.
+- You can manually edit `var_env` and `cmd_options` fields in the state file - these will be used when starting/restarting tasks via the TUI.
 
 ## Configuration
 
@@ -69,74 +74,61 @@ The state file is a JSON with the following structure:
 
 ## States
 
-### User Commands (modifiable by user)
+All states are automatically updated by the scheduler when task status changes. The `state` field is read-only from a user perspective (do not edit it manually).
 
-- **`START`**: Start a fuzzer that is `STOPPED` or `CRASHED`. If the fuzzer is already `RUNNING`, this command is ignored.
-- **`STOP`**: Stop the fuzzer if it is running
-- **`RESTART`**: Restart a fuzzer that is already `RUNNING`. If the fuzzer is `STOPPED` or `CRASHED`, you must first change its state to `START` in the file.
-
-### Automatic States (updated by scheduler)
-
-- **`RUNNING`**: The fuzzer is running
+- **`RUNNING`**: The fuzzer is currently running
 - **`CRASHED`**: The fuzzer has crashed
-- **`STOPPED`**: The fuzzer has been stopped (automatic state after a `STOP` or target deletion)
+- **`STOPPED`**: The fuzzer has been stopped (either manually via TUI or automatically when target is deleted)
 
 ## How It Works
 
-1. **Read**: On each `update()` call, the scheduler reads the state file
-2. **Apply**: User commands (`START`, `STOP`, `RESTART`) are applied
-3. **Update**: The scheduler updates the file with actual states (`RUNNING`, `CRASHED`, `STOPPED`)
+1. **Creation**: The state file is created at scheduler initialization with an empty state
+2. **Update on Changes**: The state file is updated only when task status changes:
+   - When a task is added (new binary detected)
+   - When a task is removed (binary deleted)
+   - When a task status changes (RUNNING → CRASHED, RUNNING → STOPPED, etc.)
+   - When a task is started/stopped/restarted via the TUI
+3. **Logging**: The state file serves as a persistent log of all fuzzing tasks and their current status
+4. **Preservation**: Environment variables (`var_env`) and command options (`cmd_options`) are preserved across updates
+5. **Configuration**: When starting or restarting a task via the TUI, the scheduler reads `var_env` and `cmd_options` from the state file if they exist
 
-## Usage Examples
+## Configuring Task Options
 
-### Restart a crashed fuzzer
+You can edit the state file to add or modify environment variables and command options for fuzzers. These options will be used the next time the task is started or restarted via the TUI.
 
-1. Edit the state file and change the state to `START`:
-```json
-{
-  "fuzzers": [
-    {
-      "path": "/path/to/fuzzer",
-      "sha": "a1b2c3d4...",
-      "state": "START"
-    }
-  ]
-}
-```
+### Adding Environment Variables
 
-2. The scheduler will detect the `START` command on the next `update()` (every 60 seconds by default) and restart the fuzzer
-
-**Note**: To restart a fuzzer that is already `RUNNING`, use `RESTART` instead of `START`.
-
-### Stop a specific fuzzer
+Edit the state file and add a `var_env` object to the fuzzer entry:
 
 ```json
 {
   "fuzzers": [
     {
       "path": "/path/to/fuzzer",
-      "sha": "a1b2c3d4...",
-      "state": "STOP"
-    }
-  ]
-}
-```
-
-**Note**: After stopping, the state will be automatically set to `STOPPED` by the scheduler.
-
-### Start a new fuzzer with custom options
-
-```json
-{
-  "fuzzers": [
-    {
-      "path": "/path/to/new_fuzzer",
-      "sha": "f6e5d4c3...",
-      "state": "START",
+      "sha": "a1b2c3d4e5f6...",
+      "state": "STOPPED",
       "var_env": {
         "ASAN_OPTIONS": "detect_leaks=1",
         "UBSAN_OPTIONS": "halt_on_error=1"
       },
+      "cmd_options": null
+    }
+  ]
+}
+```
+
+### Adding Command Options
+
+Edit the state file and add a `cmd_options` array to the fuzzer entry:
+
+```json
+{
+  "fuzzers": [
+    {
+      "path": "/path/to/fuzzer",
+      "sha": "a1b2c3d4e5f6...",
+      "state": "STOPPED",
+      "var_env": null,
       "cmd_options": [
         "-max_total_time=7200",
         "-jobs=2",
@@ -147,19 +139,61 @@ The state file is a JSON with the following structure:
 }
 ```
 
+### Combined Configuration
+
+You can combine both environment variables and command options:
+
+```json
+{
+  "fuzzers": [
+    {
+      "path": "/path/to/fuzzer",
+      "sha": "a1b2c3d4e5f6...",
+      "state": "STOPPED",
+      "var_env": {
+        "ASAN_OPTIONS": "detect_leaks=1"
+      },
+      "cmd_options": [
+        "-max_total_time=3600",
+        "-jobs=1"
+      ]
+    }
+  ]
+}
+```
+
+**Important**: After editing the state file, the options will be used the next time you start or restart the task via the TUI. The scheduler will preserve these options in future updates.
+
+## Usage Examples
+
+### Viewing Current State
+
+The state file can be read to see the current status of all fuzzing tasks:
+
+```bash
+cat /tmp/my_scheduler_state.json | jq
+```
+
+This will show all running, crashed, and stopped fuzzers with their current configuration.
+
+### Monitoring Container Names
+
+The `container_name` field allows you to easily attach to running fuzzer containers:
+
+```bash
+# Get container name from state file
+CONTAINER=$(cat /tmp/my_scheduler_state.json | jq -r '.fuzzers[0].container_name')
+
+# Attach to container
+docker attach $CONTAINER
+# or
+docker exec -it $CONTAINER bash
+```
+
+### Task Management
+
+To start, stop, or restart tasks, use the TUI interface. See [fuzztui.md](fuzztui.md) for details on using the task management menu.
 
 
-## Important Notes
 
-- The file is updated after each `update()` and after each `report_crashes()`
-- User modifications are applied on the next `update()` cycle (60 seconds by default)
-- The SHA must be in hexadecimal (64 characters)
-- The path must exactly match the binary path in the targets
-- The `container_name` field is automatically filled by the scheduler and allows easy container attachment:
-  ```bash
-  docker attach <container_name>
-  # or
-  docker exec -it <container_name> bash
-  ```
-- The `var_env` and `cmd_options` fields are preserved during automatic state file updates. You can modify them in the file to control fuzzer behavior on the next startup.
-- On first launch of a fuzzer, `var_env` and `cmd_options` are `null` and default scheduler values are used. After the first launch, these values are preserved in the state file.
+

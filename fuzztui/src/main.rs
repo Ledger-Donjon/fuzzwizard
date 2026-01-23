@@ -16,10 +16,10 @@ use log::{error, info, LevelFilter};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
-    style::Stylize,
+    style::{Color, Modifier, Style, Stylize},
     symbols::border,
-    text::{Line, Text},
-    widgets::{Block, Paragraph, Tabs, Widget},
+    text::{Line, Span, Text},
+    widgets::{Block, Clear, Paragraph, Row, Table, Tabs, Widget},
     DefaultTerminal, Frame,
 };
 use reqwest::Url;
@@ -125,6 +125,11 @@ pub struct App {
     status_update_receiver: Option<mpsc::Receiver<()>>, // Notification of completion
     launcher_cache: LauncherDisplayCache,
     scroll_offset: u16, // Vertical scroll offset
+    config_reload_prompt: bool, // Whether to show config reload confirmation prompt
+    task_selection_index: usize, // Index of selected task in the table (for scheduler views)
+    task_menu_open: bool, // Whether the task management menu is open
+    task_menu_selection: usize, // Index of selected action in the menu
+    task_menu_actions: Vec<String>, // Available actions for the selected task
 }
 
 impl App {
@@ -197,6 +202,11 @@ impl App {
                 schedulers: Vec::new(),
             },
             scroll_offset: 0,
+            config_reload_prompt: false,
+            task_selection_index: 0,
+            task_menu_open: false,
+            task_menu_selection: 0,
+            task_menu_actions: Vec::new(),
         };
         // Initialize cache from launcher
         app.update_launcher_cache();
@@ -400,41 +410,40 @@ impl App {
             }
 
             // Update proc status (fast, non-blocking)
-            {
-                if self.tabs.index == 0 {
-                    if let Ok(mut launcher) = self.launcher.try_write() {
-                        launcher.update_proc_status();
-                    }
+            if self.tabs.index == 0 {
+                if let Ok(mut launcher) = self.launcher.try_write() {
+                    launcher.update_proc_status();
                 }
+            }
 
-                let now = Instant::now();
-                let mut should_update = false;
+            // Trigger background crash update periodically (non-blocking)
+            let now = Instant::now();
+            let mut should_update = false;
 
-                match &self.last_update {
-                    Some(last) => {
-                        if now.duration_since(*last) >= Duration::from_secs(60) {
-                            should_update = true;
-                            self.last_update = Some(now);
-                        }
-                    }
-                    None => {
+            match &self.last_update {
+                Some(last) => {
+                    if now.duration_since(*last) >= Duration::from_secs(60) {
                         should_update = true;
                         self.last_update = Some(now);
                     }
                 }
+                None => {
+                    should_update = true;
+                    self.last_update = Some(now);
+                }
+            }
 
-                if should_update && !self.pending_update {
-                    // Trigger background crash update (non-blocking)
-                    if let Some(ref sender) = self.update_sender {
-                        let _ = sender.send(self.last_crashes_date);
-                        self.pending_update = true;
-                    }
+            if should_update && !self.pending_update {
+                // Trigger background crash update (non-blocking)
+                if let Some(ref sender) = self.update_sender {
+                    let _ = sender.send(self.last_crashes_date);
+                    self.pending_update = true;
+                }
 
-                    // Update launcher status asynchronously using background thread
-                    // Send request to permanent background thread (non-blocking)
-                    if let Some(ref sender) = self.launcher_update_sender {
-                        let _ = sender.send(());
-                    }
+                // Update launcher status asynchronously using background thread
+                // Send request to permanent background thread (non-blocking)
+                if let Some(ref sender) = self.launcher_update_sender {
+                    let _ = sender.send(());
                 }
             }
 
@@ -465,29 +474,204 @@ impl App {
     }
 
     fn handle_key_event(&mut self, key_event: KeyEvent) {
+        // Handle config reload prompt
+        if self.config_reload_prompt {
+            match key_event.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    // Reload config
+                    if let Ok(mut launcher) = self.launcher.write() {
+                        launcher.reload_config();
+                    }
+                    self.config_reload_prompt = false;
+                    // Update cache after reload
+                    self.update_launcher_cache();
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    // Cancel reload
+                    self.config_reload_prompt = false;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Handle task menu
+        if self.task_menu_open {
+            match key_event.code {
+                KeyCode::Up => {
+                    if self.task_menu_selection > 0 {
+                        self.task_menu_selection -= 1;
+                    }
+                }
+                KeyCode::Down => {
+                    if self.task_menu_selection < self.task_menu_actions.len().saturating_sub(1) {
+                        self.task_menu_selection += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    // Execute selected action
+                    self.execute_task_action();
+                    self.task_menu_open = false;
+                }
+                KeyCode::Esc | KeyCode::Char('m') => {
+                    // Close menu
+                    self.task_menu_open = false;
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match key_event.code {
             KeyCode::Char('q') => self.exit(),
+            KeyCode::Char('c') => {
+                self.config_reload_prompt = true;
+            }
             KeyCode::Left => {
                 self.tabs.previous();
                 self.scroll_offset = 0; // Reset scroll when changing tabs
+                self.task_selection_index = 0; // Reset task selection when changing tabs
+                self.task_menu_open = false; // Close menu when changing tabs
             }
             KeyCode::Right => {
                 self.tabs.next();
                 self.scroll_offset = 0; // Reset scroll when changing tabs
+                self.task_selection_index = 0; // Reset task selection when changing tabs
+                self.task_menu_open = false; // Close menu when changing tabs
             }
             KeyCode::Up => {
-                if self.scroll_offset > 0 {
-                    self.scroll_offset -= 1;
+                if self.tabs.index == 0 {
+                    // In Processes view, navigate in the window
+                    if self.scroll_offset > 0 {
+                        self.scroll_offset -= 1;
+                    }
+                } else {
+                    // In scheduler view, navigate in the task table
+                    if self.task_selection_index > 0 {
+                        self.task_selection_index -= 1;
+                    }
                 }
             }
             KeyCode::Down => {
-                // Limit scroll to prevent overflow (ratatui will handle the rest)
-                // We use a reasonable maximum to avoid issues
-                if self.scroll_offset < 10000 {
-                    self.scroll_offset += 1;
+                if self.tabs.index == 0 {
+                    // In Processes view, navigate in the window
+                    // Limit scroll to prevent overflow (ratatui will handle the rest)
+                    if self.scroll_offset < 10000 {
+                        self.scroll_offset += 1;
+                    }
+                } else {
+                    // In scheduler view, navigate in the task table
+                    let scheduler_index = self.tabs.index - 1;
+                    if let Some(tasks) = self.tasks_cache.get(&scheduler_index) {
+                        if self.task_selection_index < tasks.len().saturating_sub(1) {
+                            self.task_selection_index += 1;
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('m') => {
+                // Open task management menu if in scheduler view and a task is selected
+                // Only if the scheduler is running
+                if self.tabs.index > 0 {
+                    let scheduler_index = self.tabs.index - 1;
+                    // Check if scheduler is running
+                    if scheduler_index < self.launcher_cache.schedulers.len() {
+                        let scheduler_status = self.launcher_cache.schedulers[scheduler_index].status;
+                        if !matches!(scheduler_status, ProcessStatus::Running) {
+                            return; // Scheduler is stopped, cannot interact with tasks
+                        }
+                    }
+                    let task_status = if let Some(tasks) = self.tasks_cache.get(&scheduler_index) {
+                        if !tasks.is_empty() && self.task_selection_index < tasks.len() {
+                            Some(tasks[self.task_selection_index].is_running)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(status) = task_status {
+                        self.open_task_menu(status);
+                    }
                 }
             }
             _ => {}
+        }
+    }
+
+    fn open_task_menu(&mut self, task_status: TaskStatus) {
+        self.task_menu_actions.clear();
+        match task_status {
+            TaskStatus::Running => {
+                self.task_menu_actions.push("STOP".to_string());
+                self.task_menu_actions.push("RESTART".to_string());
+            }
+            TaskStatus::Stopped | TaskStatus::Crashed => {
+                self.task_menu_actions.push("START".to_string());
+            }
+        }
+        self.task_menu_selection = 0;
+        self.task_menu_open = true;
+    }
+
+    fn execute_task_action(&mut self) {
+        if self.tabs.index == 0 {
+            return; // Not in scheduler view
+        }
+
+        let scheduler_index = self.tabs.index - 1;
+        if self.task_menu_selection >= self.task_menu_actions.len() {
+            return;
+        }
+
+        // Check if scheduler is running before executing action
+        if scheduler_index >= self.launcher_cache.schedulers.len() {
+            return;
+        }
+        let scheduler_status = self.launcher_cache.schedulers[scheduler_index].status;
+        if !matches!(scheduler_status, ProcessStatus::Running) {
+            return; // Scheduler is stopped, cannot interact with tasks
+        }
+
+        let action = self.task_menu_actions[self.task_menu_selection].clone();
+        
+        // Get SHA from cache first (before borrowing launcher)
+        let sha = if let Some(tasks) = self.tasks_cache.get(&scheduler_index) {
+            if self.task_selection_index >= tasks.len() {
+                return;
+            }
+            tasks[self.task_selection_index].sha
+        } else {
+            return;
+        };
+
+        // Execute action via launcher
+        if let Ok(mut launcher) = self.launcher.write() {
+            if scheduler_index < launcher.scheduler_processes.len() {
+                // Double check scheduler is still running
+                if !matches!(launcher.scheduler_processes[scheduler_index].status, ProcessStatus::Running) {
+                    return;
+                }
+                let scheduler = &mut launcher.scheduler_processes[scheduler_index].scheduler;
+                match action.as_str() {
+                    "START" => {
+                        if let Err(e) = scheduler.start_task_by_sha(sha) {
+                            error!("Failed to start task: {:?}", e);
+                        }
+                    }
+                    "STOP" => {
+                        if let Err(e) = scheduler.stop_task_by_sha(sha) {
+                            error!("Failed to stop task: {:?}", e);
+                        }
+                    }
+                    "RESTART" => {
+                        if let Err(e) = scheduler.restart_task_by_sha(sha) {
+                            error!("Failed to restart task: {:?}", e);
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
     }
     fn sync_tabs_with_schedulers(&mut self) {
@@ -608,14 +792,35 @@ impl Widget for &App {
 
         // Render content for selected tab
         let content_area = vertical[1];
-        let instructions = Line::from(vec![
-            " Quit ".into(),
-            "<Q> ".blue().bold(),
-            " | Navigate ".into(),
-            "<Left/Right> ".blue().bold(),
-            " | Scroll ".into(),
-            "<Up/Down> ".blue().bold(),
-        ]);
+        
+        // Build instructions based on current tab
+        let instructions = if self.tabs.index == 0 {
+            // Processes view - no Manage Task option
+            Line::from(vec![
+                " Quit ".into(),
+                "<Q> ".blue().bold(),
+                " | Navigate ".into(),
+                "<Left/Right> ".blue().bold(),
+                " | Scroll ".into(),
+                "<Up/Down> ".blue().bold(),
+                " | Reload Config ".into(),
+                "<C> ".blue().bold(),
+            ])
+        } else {
+            // Scheduler view - include Manage Task option
+            Line::from(vec![
+                " Quit ".into(),
+                "<Q> ".blue().bold(),
+                " | Navigate ".into(),
+                "<Left/Right> ".blue().bold(),
+                " | Navigate Tasks ".into(),
+                "<Up/Down> ".blue().bold(),
+                " | Reload Config ".into(),
+                "<C> ".blue().bold(),
+                " | Manage Task ".into(),
+                "<M> ".blue().bold(),
+            ])
+        };
 
         let block = Block::bordered()
             .title_bottom(instructions.centered())
@@ -763,47 +968,104 @@ impl Widget for &App {
             let scheduler_index = self.tabs.index - 1; // Adjust for "Processes" tab at index 0
             if scheduler_index < self.launcher_cache.schedulers.len() {
                 let selected_scheduler = &self.launcher_cache.schedulers[scheduler_index];
+                let is_scheduler_stopped = matches!(selected_scheduler.status, ProcessStatus::Stopped);
 
-                // Build the text content
-                let mut lines = vec![
+                // Split content area: header (Name/Status/Info/StateFile) always visible, then table
+                let vertical_split = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(6), // Fixed height for header info
+                        Constraint::Min(0),    // Rest for table
+                    ])
+                    .split(content_area);
+
+                // Build header content (always visible)
+                // Apply dim style if scheduler is stopped
+                let name_style = if is_scheduler_stopped {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                };
+                let status_style = if is_scheduler_stopped {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default().fg(Color::Cyan)
+                };
+                let info_style = if is_scheduler_stopped {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default()
+                };
+                let state_file_style = if is_scheduler_stopped {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default().fg(Color::Cyan)
+                };
+                let tasks_header_style = if is_scheduler_stopped {
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().add_modifier(Modifier::BOLD)
+                };
+
+                let mut header_lines = vec![
                     Line::from(vec![
                         "Name: ".into(),
-                        selected_scheduler.name.clone().yellow().bold(),
+                        Span::styled(selected_scheduler.name.clone(), name_style),
                     ]),
                     Line::from(vec![
                         "Status: ".into(),
-                        selected_scheduler.status.to_string().cyan(),
+                        Span::styled(selected_scheduler.status.to_string(), status_style),
                     ]),
                     Line::from(vec![
                         "Info: ".into(),
-                        selected_scheduler.info.clone().into(),
+                        Span::styled(selected_scheduler.info.clone(), info_style),
                     ]),
                 ];
 
                 if let Some(ref state_file) = selected_scheduler.state_file_path {
-                    lines.push(Line::from(vec![
+                    header_lines.push(Line::from(vec![
                         "State File: ".into(),
-                        state_file.clone().cyan(),
+                        Span::styled(state_file.clone(), state_file_style),
                     ]));
                 }
 
-                lines.push(Line::from("")); // Empty line separator
-                lines.push(Line::from("Tasks:".bold()));
+                header_lines.push(Line::from("")); // Empty line separator
+                header_lines.push(Line::from(vec![
+                    Span::styled("Tasks:".to_string(), tasks_header_style),
+                ]));
 
-                // Add tasks information
+                let header_text = Text::from(header_lines);
+                Paragraph::new(header_text)
+                    .block(Block::default())
+                    .render(vertical_split[0], buf);
+
+                // Build table for tasks
                 if let Some(tasks) = self.tasks_cache.get(&scheduler_index) {
                     if tasks.is_empty() {
-                        lines.push(Line::from("  No tasks running".dim()));
+                        let empty_text_style = if is_scheduler_stopped {
+                            Style::default().fg(Color::DarkGray)
+                        } else {
+                            Style::default()
+                        };
+                        let empty_text = Text::from(vec![Line::from(vec![
+                            Span::styled("  No tasks running", empty_text_style),
+                        ])]);
+                        Paragraph::new(empty_text)
+                            .block(block)
+                            .render(vertical_split[1], buf);
                     } else {
-                        for task_info in tasks {
+                        // Create table rows
+                        let mut rows: Vec<Row> = Vec::new();
+                        
+                        for (idx, task_info) in tasks.iter().enumerate() {
                             let status_text = match task_info.is_running {
-                                TaskStatus::Running => "Running".green(),
-                                TaskStatus::Crashed => "Crashed".red(),
-                                TaskStatus::Stopped => "Stopped".red(),
+                                TaskStatus::Running => "Running",
+                                TaskStatus::Crashed => "Crashed",
+                                TaskStatus::Stopped => "Stopped",
                             };
 
-                            // Format date based on status
-                            let date_text = match task_info.is_running {
+                            // Format StatusTime based on status
+                            let status_time = match task_info.is_running {
                                 TaskStatus::Running => {
                                     if let Some(started) = task_info.started_at {
                                         let elapsed = started.elapsed();
@@ -811,15 +1073,13 @@ impl Widget for &App {
                                             .expect("Failed to create TimeDelta")
                                             .to_std()
                                             .unwrap();
-                                        format!("Started: {} ago", format_duration(td))
+                                        format!("{} ago", format_duration(td))
                                     } else {
-                                        "Started: unknown".to_string()
+                                        "unknown".to_string()
                                     }
                                 }
                                 TaskStatus::Crashed => {
                                     if let Some(crashed) = task_info.crashed_at {
-                                        // Convert Instant to date/time by calculating when it happened
-                                        // We approximate by using current time minus elapsed time
                                         let elapsed = crashed.elapsed();
                                         let crash_time_since_epoch = SystemTime::now()
                                             .duration_since(std::time::UNIX_EPOCH)
@@ -832,15 +1092,13 @@ impl Widget for &App {
                                         )
                                         .unwrap_or_else(Utc::now);
                                         let dt = dt_utc.with_timezone(&Local);
-                                        format!("Crashed: {}", dt.format("%Y-%m-%d %H:%M:%S"))
+                                        dt.format("%Y-%m-%d %H:%M:%S").to_string()
                                     } else {
-                                        "Crashed: unknown".to_string()
+                                        "unknown".to_string()
                                     }
                                 }
                                 TaskStatus::Stopped => {
                                     if let Some(stopped) = task_info.stopped_at {
-                                        // Convert Instant to date/time by calculating when it happened
-                                        // We approximate by using current time minus elapsed time
                                         let elapsed = stopped.elapsed();
                                         let stop_time_since_epoch = SystemTime::now()
                                             .duration_since(std::time::UNIX_EPOCH)
@@ -853,39 +1111,97 @@ impl Widget for &App {
                                         )
                                         .unwrap_or_else(Utc::now);
                                         let dt = dt_utc.with_timezone(&Local);
-                                        format!("Stopped: {}", dt.format("%Y-%m-%d %H:%M:%S"))
+                                        dt.format("%Y-%m-%d %H:%M:%S").to_string()
                                     } else {
-                                        "Stopped: unknown".to_string()
+                                        "unknown".to_string()
                                     }
                                 }
                             };
 
-                            lines.push(Line::from(vec![
-                                "  • ".into(),
-                                format!("0x{}", &task_info.sha_hex[..16]).cyan(), // Show first 16 chars
-                                " - ".into(),
-                                task_info
-                                    .path
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("unknown")
-                                    .to_string()
-                                    .into(),
-                                " - ".into(),
-                                status_text,
+                            let sha_display = format!("0x{}", &task_info.sha_hex[..32]);
+                            let filename = task_info
+                                .path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+
+                            // Apply selection highlight
+                            // If scheduler is stopped, dim everything but still show selection for navigation
+                            let is_selected = idx == self.task_selection_index;
+                            let base_style = if is_scheduler_stopped {
+                                if is_selected {
+                                    // Show selection even when scheduler is stopped, but with dimmed style
+                                    Style::default().bg(Color::DarkGray).fg(Color::White)
+                                } else {
+                                    Style::default().fg(Color::DarkGray)
+                                }
+                            } else if is_selected {
+                                Style::default().bg(Color::Blue).fg(Color::White)
+                            } else {
+                                Style::default()
+                            };
+
+                            let status_color = if is_scheduler_stopped {
+                                Color::DarkGray
+                            } else {
+                                match task_info.is_running {
+                                    TaskStatus::Running => Color::Green,
+                                    TaskStatus::Crashed | TaskStatus::Stopped => Color::Red,
+                                }
+                            };
+
+                            let status_style = if is_selected {
+                                if is_scheduler_stopped {
+                                    // Show selection even when scheduler is stopped
+                                    Style::default().bg(Color::DarkGray).fg(Color::White)
+                                } else {
+                                    Style::default().bg(Color::Blue).fg(Color::White)
+                                }
+                            } else {
+                                Style::default().fg(status_color)
+                            };
+
+                            rows.push(Row::new(vec![
+                                Span::styled(sha_display, base_style),
+                                Span::styled(filename, base_style),
+                                Span::styled(status_text.to_string(), status_style),
+                                Span::styled(status_time, base_style),
                             ]));
-                            lines.push(Line::from(vec!["    ".into(), date_text.dim()]));
                         }
+
+                        // Create table with header
+                        // Apply dim style to header if scheduler is stopped
+                        let header_style = if is_scheduler_stopped {
+                            Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().add_modifier(Modifier::BOLD)
+                        };
+                        let table = Table::new(
+                            rows,
+                            [
+                                Constraint::Percentage(35), // SHA
+                                Constraint::Percentage(25), // FileName
+                                Constraint::Percentage(15), // Status
+                                Constraint::Percentage(25), // StatusTime
+                            ],
+                        )
+                        .header(Row::new(vec![
+                            Span::styled("SHA", header_style),
+                            Span::styled("FileName", header_style),
+                            Span::styled("Status", header_style),
+                            Span::styled("StatusTime", header_style),
+                        ]))
+                        .block(block);
+
+                        table.render(vertical_split[1], buf);
                     }
                 } else {
-                    lines.push(Line::from("  No tasks running".dim()));
+                    let empty_text = Text::from("  No tasks running".dim());
+                    Paragraph::new(empty_text)
+                        .block(block)
+                        .render(vertical_split[1], buf);
                 }
-
-                let text = Text::from(lines);
-                Paragraph::new(text)
-                    .block(block)
-                    .scroll((self.scroll_offset, 0))
-                    .render(content_area, buf);
             } else {
                 let text = Text::from("No schedulers available");
                 Paragraph::new(text)
@@ -893,6 +1209,111 @@ impl Widget for &App {
                     .scroll((self.scroll_offset, 0))
                     .render(content_area, buf);
             }
+        }
+
+        // Show task menu as overlay if active (rendered after config prompt)
+        if self.task_menu_open && self.tabs.index > 0 {
+            let scheduler_index = self.tabs.index - 1;
+            if let Some(tasks) = self.tasks_cache.get(&scheduler_index) {
+                if self.task_selection_index < tasks.len() {
+                    // Create a popup area near the selected task - make it larger
+                    let menu_width = 30;
+                    let menu_height = self.task_menu_actions.len() as u16 + 4; // Add more padding
+                    let popup_area = Rect {
+                        x: content_area.x + content_area.width / 2 - menu_width / 2,
+                        y: content_area.y + content_area.height / 2 - menu_height / 2,
+                        width: menu_width,
+                        height: menu_height,
+                    };
+                    
+                    // Create menu items
+                    let mut menu_lines = vec![Line::from(vec![
+                        "Task Manager".bold().into(),
+                    ])];
+                    menu_lines.push(Line::from(""));
+                    
+                    for (idx, action) in self.task_menu_actions.iter().enumerate() {
+                        let is_selected = idx == self.task_menu_selection;
+                        let style = if is_selected {
+                            Style::default().bg(Color::Blue).fg(Color::White)
+                        } else {
+                            Style::default()
+                        };
+                        menu_lines.push(Line::from(vec![
+                            if is_selected { "> ".into() } else { "  ".into() },
+                            Span::styled(action.clone(), style),
+                        ]));
+                    }
+                    
+                    menu_lines.push(Line::from(""));
+                    menu_lines.push(Line::from(vec![
+                        "Press ".into(),
+                        "Enter".blue().bold(),
+                        " to select, ".into(),
+                        "Esc".blue().bold(),
+                        " to cancel".into(),
+                    ]));
+                    
+                    let menu_block = Block::bordered()
+                        .title(" Actions ")
+                        .border_set(border::THICK)
+                        .style(Style::default().bg(Color::DarkGray).fg(Color::White));
+                    
+                    let menu_text = Text::from(menu_lines);
+                    Paragraph::new(menu_text)
+                        .block(menu_block)
+                        .render(popup_area, buf);
+                }
+            }
+        }
+
+        // Show config reload prompt as overlay if active (rendered last so it's on top)
+        if self.config_reload_prompt {
+            // First, create an overlay that masks the entire content area
+            Clear.render(content_area, buf);
+            
+            // Fill the content area with a semi-transparent overlay
+            for y in content_area.y..content_area.y + content_area.height {
+                for x in content_area.x..content_area.x + content_area.width {
+                    let cell = &mut buf[(x, y)];
+                    cell.set_bg(Color::Black);
+                    cell.set_fg(Color::White);
+                    cell.set_char(' ');
+                    // Add a dim modifier to make it look like an overlay
+                    cell.set_style(Style::default().add_modifier(Modifier::DIM));
+                }
+            }
+            
+            // Create a centered popup area
+            let popup_area = Rect {
+                x: content_area.x + content_area.width / 4,
+                y: content_area.y + content_area.height / 2 - 3,
+                width: content_area.width / 2,
+                height: 7,
+            };
+            
+            let popup_block = Block::bordered()
+                .title(" Reload Config ")
+                .border_set(border::THICK)
+                .style(Style::default().bg(Color::DarkGray).fg(Color::White));
+            
+            let popup_text = Text::from(vec![
+                Line::from(""),
+                Line::from("Do you want to reload the main config?"),
+                Line::from(""),
+                Line::from(vec![
+                    " Press ".into(),
+                    "Y".green().bold(),
+                    " to confirm, ".into(),
+                    "N".red().bold(),
+                    " to cancel ".into(),
+                ]),
+            ]);
+            
+            Paragraph::new(popup_text)
+                .block(popup_block)
+                .centered()
+                .render(popup_area, buf);
         }
     }
 }
