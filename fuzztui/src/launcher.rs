@@ -19,11 +19,11 @@ fn send_admin_event_to_backend(backend_url: &str, event_type: &str, message: &st
     });
 
     if let Err(e) = client
-        .post(format!("{}/admin_events", backend_url))
+        .post(format!("{backend_url}/admin_events"))
         .json(&event)
         .send()
     {
-        error!("Failed to send admin event to backend: {}", e);
+        error!("Failed to send admin event to backend: {e}");
     }
 }
 
@@ -171,7 +171,7 @@ impl Launcher {
         // Launch all schedulers in the array, collect their children and start times
         for scheduler in &self.config_json.schedulers {
             let scheduler_config_path = scheduler.config.clone();
-            info!("Reading scheduler config file {}\n", scheduler_config_path);
+            info!("Reading scheduler config file {scheduler_config_path}\n");
             let (scheduler_started, config, last_build_at) = create_scheduler(
                 &scheduler_config_path,
                 self.config_json.logdir.clone(),
@@ -247,10 +247,9 @@ impl Launcher {
             Ok(json) => json,
             Err(e) => {
                 error!(
-                    "\x1b[31m[Error] Failed to parse config.json: {}, config is not updated\x1b[0m",
-                    e
+                    "\x1b[31m[Error] Failed to parse config.json: {e}, config is not updated\x1b[0m"
                 );
-                self.config_status = format!("Error: Failed to parse config.json: {}", e);
+                self.config_status = format!("Error: Failed to parse config.json: {e}");
                 return;
             }
         };
@@ -406,7 +405,9 @@ impl Launcher {
 
     pub fn shutdown(&mut self) {
         for proc in &mut self.procs {
-            proc.child.kill().unwrap();
+            if let Err(e) = proc.child.kill() {
+                error!("Failed to kill process '{}': {}", proc.name, e);
+            }
         }
         for scheduler in &mut self.scheduler_processes {
             scheduler.scheduler.kill_tasks();
@@ -458,7 +459,7 @@ fn spawn_process(name: &str, cmd: &str, args: &[&str]) -> ManagedProcess {
         name: name.to_string(),
         child,
         started_at: Instant::now(),
-        info: format!("Process '{}' started", name).to_string(),
+        info: format!("Process '{name}' started").to_string(),
         status: ProcessStatus::Running,
     }
 }
@@ -481,10 +482,7 @@ fn build_targets(
     }
 
     // Log the script being executed for audit purposes
-    info!(
-        "Executing build script for {}: {}",
-        scheduler_name, build_script
-    );
+    info!("Executing build script for {scheduler_name}: {build_script}");
 
     let status = Command::new("sh")
         .arg("-c")
@@ -496,19 +494,16 @@ fn build_targets(
 
     match status {
         Ok(s) if s.success() => {
-            info!("build_script ran successfully for {}", scheduler_name);
+            info!("build_script ran successfully for {scheduler_name}");
         }
         Ok(s) => {
-            let msg = format!(
-                "build_script exited with status: {} for {}",
-                s, scheduler_name
-            );
-            error!("{}", msg);
+            let msg = format!("build_script exited with status: {s} for {scheduler_name}");
+            error!("{msg}");
             send_admin_event_to_backend(backend_url, "build_error", &msg);
         }
         Err(e) => {
-            let msg = format!("Failed to run build_script for {}: {}", scheduler_name, e);
-            error!("{}", msg);
+            let msg = format!("Failed to run build_script for {scheduler_name}: {e}");
+            error!("{msg}");
             send_admin_event_to_backend(backend_url, "build_error", &msg);
         }
     }
@@ -526,9 +521,9 @@ fn create_scheduler(
     SchedulerConfig,
     Option<Instant>,
 ) {
-    info!("Reading config file {}\n", config_path);
+    info!("Reading config file {config_path}\n");
     let config_contents = fs::read_to_string(config_path)
-        .unwrap_or_else(|_| panic!("Failed to read config file {}", config_path));
+        .unwrap_or_else(|_| panic!("Failed to read config file {config_path}"));
 
     // If logdir does not exist, create it
     if let Err(e) = std::fs::create_dir_all(&logdir) {

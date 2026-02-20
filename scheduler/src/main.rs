@@ -48,15 +48,14 @@ fn build_targets(config_json: scheduler::SchedulerConfig) {
     for pattern in DANGEROUS_PATTERNS {
         if build_script.contains(pattern) {
             info!(
-                "Warning: Build script contains potentially dangerous pattern '{}'. \
-                 Ensure the script is from a trusted source.",
-                pattern
+                "Warning: Build script contains potentially dangerous pattern '{pattern}'. \
+                 Ensure the script is from a trusted source."
             );
         }
     }
 
     // Log the script being executed for audit purposes
-    info!("Executing build script: {}", build_script);
+    info!("Executing build script: {build_script}");
 
     let status = Command::new("sh")
         .arg("-c")
@@ -69,10 +68,10 @@ fn build_targets(config_json: scheduler::SchedulerConfig) {
             info!("build_script ran successfully");
         }
         Ok(s) => {
-            error!("build_script exited with status: {}", s);
+            error!("build_script exited with status: {s}");
         }
         Err(e) => {
-            error!("Failed to run build_script: {}", e);
+            error!("Failed to run build_script: {e}");
         }
     }
 }
@@ -89,7 +88,7 @@ fn main() {
     let config_contents = match fs::read_to_string(config_path) {
         Ok(contents) => contents,
         Err(e) => {
-            eprintln!("Failed to read config file '{}': {}", config_path, e);
+            eprintln!("Failed to read config file '{config_path}': {e}");
             std::process::exit(1);
         }
     };
@@ -104,20 +103,16 @@ fn main() {
     };
     // If logdir does not exist, create it
     if let Err(e) = std::fs::create_dir_all(&logdir) {
-        eprintln!("Failed to create log directory '{}': {}", logdir, e);
+        eprintln!("Failed to create log directory '{logdir}': {e}");
         std::process::exit(1);
     }
 
     // Configure ftail to write to a file
-    let log_file_path = format!("{}/scheduler.log", logdir);
+    let log_file_path = format!("{logdir}/scheduler.log");
     // Ensure the directory exists
     if let Some(parent) = std::path::Path::new(&log_file_path).parent() {
         if let Err(e) = fs::create_dir_all(parent) {
-            eprintln!(
-                "Failed to create log directory '{}': {}",
-                parent.display(),
-                e
-            );
+            eprintln!("Failed to create log directory '{}': {e}", parent.display());
             std::process::exit(1);
         }
     }
@@ -130,7 +125,7 @@ fn main() {
         )
         .init()
     {
-        eprintln!("Failed to initialize logger: {}", e);
+        eprintln!("Failed to initialize logger: {e}");
         std::process::exit(1);
     }
 
@@ -139,7 +134,7 @@ fn main() {
     let config_json: scheduler::SchedulerConfig = match serde_json::from_str(&config_contents) {
         Ok(config) => config,
         Err(e) => {
-            eprintln!("Failed to parse config file as JSON: {}", e);
+            eprintln!("Failed to parse config file as JSON: {e}");
             std::process::exit(1);
         }
     };

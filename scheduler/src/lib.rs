@@ -22,6 +22,9 @@ use std::{
 };
 use thiserror::Error;
 
+/// Return type for get_task_options_from_state_file (var_env, cmd_options).
+type TaskOptionsFromState = (Option<HashMap<String, String>>, Option<Vec<String>>);
+
 /// Errors that can occur within the scheduler crate
 #[derive(Debug, Error)]
 pub enum SchedulerError {
@@ -101,6 +104,9 @@ pub struct StateFile {
 /// Convenient result alias for the scheduler crate
 pub type Result<T> = std::result::Result<T, SchedulerError>;
 
+/// Coverage analysis module
+mod coverage;
+
 /// Security validation module for input sanitization
 pub mod validation {
     use super::{Result, SchedulerError};
@@ -175,8 +181,7 @@ pub mod validation {
             .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
         {
             return Err(SchedulerError::InvalidInput(format!(
-                "Invalid characters in environment variable key: {}",
-                key
+                "Invalid characters in environment variable key: {key}"
             )));
         }
 
@@ -297,8 +302,7 @@ pub mod validation {
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
         {
             return Err(SchedulerError::InvalidInput(format!(
-                "Invalid characters in container name: {}",
-                name
+                "Invalid characters in container name: {name}"
             )));
         }
 
@@ -337,7 +341,7 @@ impl TargetsCollector for DirectoryTargetsCollector {
             let read_dir = match fs::read_dir(directory) {
                 Ok(rd) => rd,
                 Err(e) => {
-                    log::error!("Failed to read directory {:?}: {}", directory, e);
+                    log::error!("Failed to read directory {directory:?}: {e}");
                     continue; // Move to next directory
                 }
             };
@@ -347,7 +351,7 @@ impl TargetsCollector for DirectoryTargetsCollector {
                 let direntry = match direntry_result {
                     Ok(de) => de,
                     Err(e) => {
-                        log::error!("Failed to read directory entry in {:?}: {}", directory, e);
+                        log::error!("Failed to read directory entry in {directory:?}: {e}");
                         continue;
                     }
                 };
@@ -363,7 +367,7 @@ impl TargetsCollector for DirectoryTargetsCollector {
                 let metadata = match target_path.metadata() {
                     Ok(m) => m,
                     Err(e) => {
-                        log::error!("Failed to get metadata for {:?}: {}", target_path, e);
+                        log::error!("Failed to get metadata for {target_path:?}: {e}");
                         continue;
                     }
                 };
@@ -377,7 +381,7 @@ impl TargetsCollector for DirectoryTargetsCollector {
                 let file_contents = match fs::read(&target_path) {
                     Ok(contents) => contents,
                     Err(e) => {
-                        log::error!("Failed to read file {:?}: {}", target_path, e);
+                        log::error!("Failed to read file {target_path:?}: {e}");
                         continue;
                     }
                 };
@@ -546,34 +550,19 @@ fn collect_coverage_container(binary: &Path, container_name: &str, timeout_secs:
     match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
         Ok(Ok(status)) => {
             if status.success() {
-                info!(
-                    "Coverage collection successful for container: {}",
-                    name_for_log
-                );
+                info!("Coverage collection successful for container: {name_for_log}");
             } else {
-                warn!(
-                    "Coverage collection failed for container {}: {:?}",
-                    name_for_log, status
-                );
+                warn!("Coverage collection failed for container {name_for_log}: {status:?}");
             }
         }
         Ok(Err(e)) => {
-            warn!(
-                "Failed to execute coverage collection for container {}: {}",
-                name_for_log, e
-            );
+            warn!("Failed to execute coverage collection for container {name_for_log}: {e}");
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            warn!(
-                "Coverage collection timeout ({}s) for container: {}",
-                timeout_secs, name_for_log
-            );
+            warn!("Coverage collection timeout ({timeout_secs}s) for container: {name_for_log}");
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
-            warn!(
-                "Coverage collection thread disconnected for container: {}",
-                name_for_log
-            );
+            warn!("Coverage collection thread disconnected for container: {name_for_log}");
         }
     }
 }
@@ -606,34 +595,21 @@ fn collect_coverage_native(fuzzer_name: &str, timeout_secs: u64) {
     match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
         Ok(Ok(status)) => {
             if status.success() {
-                info!(
-                    "Coverage collection successful for fuzzer: {}",
-                    fuzzer_name_for_log
-                );
+                info!("Coverage collection successful for fuzzer: {fuzzer_name_for_log}");
             } else {
-                warn!(
-                    "Coverage collection failed for fuzzer {}: {:?}",
-                    fuzzer_name_for_log, status
-                );
+                warn!("Coverage collection failed for fuzzer {fuzzer_name_for_log}: {status:?}");
             }
         }
         Ok(Err(e)) => {
-            warn!(
-                "Failed to execute coverage collection for fuzzer {}: {}",
-                fuzzer_name_for_log, e
-            );
+            warn!("Failed to execute coverage collection for fuzzer {fuzzer_name_for_log}: {e}");
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
             warn!(
-                "Coverage collection timeout ({}s) for fuzzer: {}",
-                timeout_secs, fuzzer_name_for_log
+                "Coverage collection timeout ({timeout_secs}s) for fuzzer: {fuzzer_name_for_log}"
             );
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
-            warn!(
-                "Coverage collection thread disconnected for fuzzer: {}",
-                fuzzer_name_for_log
-            );
+            warn!("Coverage collection thread disconnected for fuzzer: {fuzzer_name_for_log}");
         }
     }
 }
@@ -741,18 +717,12 @@ impl<C: TargetsCollector> Scheduler<C> {
 
     /// Read the state file and return the state entries
     /// Get var_env and cmd_options for a task from the state file
-    fn get_task_options_from_state_file(
-        &self,
-        sha: Sha,
-    ) -> Result<(Option<HashMap<String, String>>, Option<Vec<String>>)> {
+    fn get_task_options_from_state_file(&self, sha: Sha) -> Result<TaskOptionsFromState> {
         let sha_str = hex::encode(sha);
         if let Some(state_file) = self.read_state_file()? {
             for entry in &state_file.fuzzers {
                 if entry.sha == sha_str {
-                    return Ok((
-                        entry.var_env.clone(),
-                        entry.cmd_options.clone(),
-                    ));
+                    return Ok((entry.var_env.clone(), entry.cmd_options.clone()));
                 }
             }
         }
@@ -764,22 +734,23 @@ impl<C: TargetsCollector> Scheduler<C> {
     /// Returns the task path for logging purposes
     fn start_task_with_state_file_options(&mut self, sha: Sha) -> Result<PathBuf> {
         // Find the path for this SHA
-        let path = self.targets.get(&sha).ok_or_else(|| {
-            SchedulerError::InvalidInput("Task not found in targets".to_string())
-        })?;
-        
+        let path = self
+            .targets
+            .get(&sha)
+            .ok_or_else(|| SchedulerError::InvalidInput("Task not found in targets".to_string()))?;
+
         let fuzzer_path = path.canonicalize()?;
         let task_path = fuzzer_path.clone();
-        
+
         // Read var_env and cmd_options from state file if available
         let (var_env, cmd_options) = self.get_task_options_from_state_file(sha)?;
-        
+
         let task = self.start_task(fuzzer_path, sha, var_env.as_ref(), cmd_options.as_ref())?;
         self.tasks.insert(sha, task);
-        
+
         // Update state file
         let _ = self.write_state_file();
-        
+
         Ok(task_path)
     }
 
@@ -790,7 +761,7 @@ impl<C: TargetsCollector> Scheduler<C> {
 
         // Acquire read lock
         let _lock = self.state_file_lock.read().map_err(|e| {
-            io::Error::other(format!("Failed to acquire read lock on state file: {}", e))
+            io::Error::other(format!("Failed to acquire read lock on state file: {e}"))
         })?;
         // Try to read the file
         let contents = match fs::read_to_string(state_path) {
@@ -939,14 +910,14 @@ impl<C: TargetsCollector> Scheduler<C> {
         let json = serde_json::to_string_pretty(&state_file).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Failed to serialize state: {}", e),
+                format!("Failed to serialize state: {e}"),
             )
         })?;
         fs::write(&temp_path, json)?;
 
         // Acquire write lock
         let _lock = self.state_file_lock.write().map_err(|e| {
-            io::Error::other(format!("Failed to acquire write lock on state file: {}", e))
+            io::Error::other(format!("Failed to acquire write lock on state file: {e}"))
         })?;
 
         fs::rename(&temp_path, state_path)?;
@@ -956,7 +927,7 @@ impl<C: TargetsCollector> Scheduler<C> {
     fn kill_task(&mut self, task: &mut Task) {
         if let Some(ref container_name) = task.container_name {
             if let Some(ref binary) = self.container_binary {
-                info!("killing container: {:?}", container_name);
+                info!("killing container: {container_name:?}");
                 remove_container(binary, container_name);
             } else {
                 warn!("Container name present but container binary not configured");
@@ -973,7 +944,7 @@ impl<C: TargetsCollector> Scheduler<C> {
 
         let latest_targets = self.collector.collect_targets();
 
-        debug!("latest_targets: {:?}", latest_targets);
+        debug!("latest_targets: {latest_targets:?}");
 
         let old_targets_sha: HashSet<Sha> = self.targets.keys().copied().collect();
         let latest_targets_sha: HashSet<Sha> = latest_targets.keys().copied().collect();
@@ -994,7 +965,7 @@ impl<C: TargetsCollector> Scheduler<C> {
 
         // Helper function to log target paths
         let log_targets = |label: &str, shas: &[Sha], targets_map: &HashMap<Sha, PathBuf>| {
-            info!("{} (paths):", label);
+            info!("{label} (paths):");
             for sha in shas {
                 if let Some(path) = targets_map.get(sha) {
                     info!("- {}: {} : {:?}", label, hex::encode(sha), path.display());
@@ -1009,10 +980,10 @@ impl<C: TargetsCollector> Scheduler<C> {
         log_targets("START", &targets_to_start, &latest_targets);
 
         for target in targets_to_stop {
-            info!("stopping task: {:x?}", target);
+            info!("stopping task: {target:x?}");
             if let Some(mut task) = self.tasks.remove(&target) {
                 self.kill_task(&mut task);
-                info!("removing task: {:?}", target);
+                info!("removing task: {target:?}");
                 // Task removed, update state file
                 let _ = self.write_state_file();
             } else {
@@ -1025,7 +996,7 @@ impl<C: TargetsCollector> Scheduler<C> {
         let mut logfile = fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(format!("{}/running_tasks.log", logdir))?;
+            .open(format!("{logdir}/running_tasks.log"))?;
 
         for target in targets_to_start {
             let Some(path) = latest_targets.get(&target) else {
@@ -1036,7 +1007,8 @@ impl<C: TargetsCollector> Scheduler<C> {
             // Read var_env and cmd_options from state file if available
             let (var_env, cmd_options) = self.get_task_options_from_state_file(target)?;
             let fuzzer_path = path.canonicalize()?;
-            let task = self.start_task(fuzzer_path, target, var_env.as_ref(), cmd_options.as_ref())?;
+            let task =
+                self.start_task(fuzzer_path, target, var_env.as_ref(), cmd_options.as_ref())?;
             self.tasks.insert(target, task);
             let current_date = Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
             writeln!(
@@ -1072,7 +1044,8 @@ impl<C: TargetsCollector> Scheduler<C> {
             // Read var_env and cmd_options from state file if available
             let (var_env, cmd_options) = self.get_task_options_from_state_file(target)?;
             let fuzzer_path = path.canonicalize()?;
-            let task = self.start_task(fuzzer_path, target, var_env.as_ref(), cmd_options.as_ref())?;
+            let task =
+                self.start_task(fuzzer_path, target, var_env.as_ref(), cmd_options.as_ref())?;
             // Replace the stopped task with the new running one
             self.tasks.insert(target, task);
             // Task restarted, update state file
@@ -1200,7 +1173,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                 if let Some(env_vars) = var_env {
                     for (key, value) in env_vars {
                         args.push("-e".into());
-                        args.push(format!("{}={}", key, value));
+                        args.push(format!("{key}={value}"));
                     }
                 }
                 let mut cmd = Command::new(binary);
@@ -1319,7 +1292,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             match registry.lock() {
                 Ok(guard) => guard.clone(),
                 Err(e) => {
-                    warn!("Failed to lock process registry: {}", e);
+                    warn!("Failed to lock process registry: {e}");
                     return;
                 }
             }
@@ -1334,7 +1307,10 @@ impl<C: TargetsCollector> Scheduler<C> {
 
         // Process records without holding the lock
         for rec in records.iter() {
-            info!("Killing task: {:?} (scheduler: {})", rec.fuzzer_name, rec.scheduler_name);
+            info!(
+                "Killing task: {:?} (scheduler: {})",
+                rec.fuzzer_name, rec.scheduler_name
+            );
             if let Some(name) = &rec.container_name {
                 if let Some(ref binary) = self.container_binary {
                     // Use helper function to remove container
@@ -1419,15 +1395,12 @@ impl<C: TargetsCollector> Scheduler<C> {
                             .to_string_lossy()
                             .to_string();
                     }
-                    info!("crash_corpus: {:?}", crash_corpus);
+                    info!("crash_corpus: {crash_corpus:?}");
                     let crash_corpus_path = crash_corpus.clone();
                     let crashing_instance = match fs::read(&crash_corpus) {
                         Ok(data) => data,
                         Err(e) => {
-                            warn!(
-                                "Failed to read crash corpus from {:?}: {}",
-                                crash_corpus_path, e
-                            );
+                            warn!("Failed to read crash corpus from {crash_corpus_path:?}: {e}");
                             b"NO CRASH INFO - Failed to read crash corpus".to_vec()
                         }
                     };
@@ -1448,7 +1421,7 @@ impl<C: TargetsCollector> Scheduler<C> {
 
                     let status = res.status();
                     if status.is_success() {
-                        info!("Successfully uploaded crash to backend: {}", status);
+                        info!("Successfully uploaded crash to backend: {status}");
                     } else {
                         warn!(
                             "Backend returned error status: {} - {}",
@@ -1461,12 +1434,12 @@ impl<C: TargetsCollector> Scheduler<C> {
                 Err(e) => return Err(SchedulerError::Io(e)),
             }
         }
-        
+
         // Update state file if any task crashed
         if !crashed_tasks.is_empty() {
             let _ = self.write_state_file();
         }
-        
+
         Ok(())
     }
 
@@ -1580,7 +1553,7 @@ impl<C: TargetsCollector> Scheduler<C> {
         }
 
         let task_path = self.start_task_with_state_file_options(sha)?;
-        info!("Task started: {:?}", task_path);
+        info!("Task started: {task_path:?}");
         Ok(())
     }
 
@@ -1593,7 +1566,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                 task.status = TaskStatus::Stopped;
                 task.stopped_at = Some(Instant::now());
                 self.tasks.insert(sha, task);
-                info!("Task stopped: {:?}", task_path);
+                info!("Task stopped: {task_path:?}");
                 // Task stopped, update state file
                 let _ = self.write_state_file();
                 Ok(())
@@ -1655,5 +1628,72 @@ impl<C: TargetsCollector> Scheduler<C> {
                 }
             }
         }
+    }
+
+    /// Get coverage analysis for a specific task by SHA
+    ///
+    /// # Arguments
+    ///
+    /// * `sha` - SHA hash of the fuzzer binary
+    ///
+    /// # Returns
+    ///
+    /// A string containing the coverage analysis report, or an error message
+    pub fn get_task_coverage(&self, sha: &Sha) -> String {
+        // Check if coverage is enabled
+        if !self.has_coverage {
+            return "Coverage is not enabled for this scheduler".to_string();
+        }
+
+        // Find the task
+        let task = match self.tasks.get(sha) {
+            Some(t) => t,
+            None => {
+                return format!("Task not found for SHA: 0x{}", hex::encode(sha));
+            }
+        };
+
+        // Get fuzzer name from task path
+        let fuzzer_name = task
+            .path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+
+        // Build coverage directory path
+        let coverage_dir = self.coverage_directory.join(fuzzer_name);
+
+        // Analyze coverage
+        coverage::analyze_coverage(&coverage_dir, &task.path, sha)
+    }
+
+    /// Get coverage for a specific file in a task
+    ///
+    /// # Arguments
+    ///
+    /// * `sha` - SHA hash of the fuzzer binary
+    /// * `file_path` - Path to the source file
+    ///
+    /// # Returns
+    ///
+    /// A string containing the coverage information for the file
+    pub fn get_task_file_coverage(&self, sha: &Sha, file_path: &Path) -> String {
+        if !self.has_coverage {
+            return "Coverage is not enabled for this scheduler".to_string();
+        }
+
+        let task = match self.tasks.get(sha) {
+            Some(t) => t,
+            None => return format!("Task not found for SHA: 0x{}", hex::encode(sha)),
+        };
+
+        let fuzzer_name = task
+            .path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+        let coverage_dir = self.coverage_directory.join(fuzzer_name);
+
+        coverage::get_file_coverage(&coverage_dir, &task.path, sha, file_path)
     }
 }

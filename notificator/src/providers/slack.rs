@@ -79,7 +79,7 @@ impl NotificationProvider for SlackNotificationProvider {
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        let dir = format!("/tmp/tmp_{}_{}", created_fmt, stem);
+        let dir = format!("/tmp/tmp_{created_fmt}_{stem}");
 
         let to_send = format!(
             "New crash for {} (id: {})\n\nTo retrieve artifacts locally:\n\n$ curl -X POST http://127.0.0.1:3000/collect_crashes -H 'Content-Type: application/json' -d '{}'\n\nFiles will be created under {}\n- {} (program binary)\n- crash_info.txt (report)\n- crash_input.txt (input)\n",

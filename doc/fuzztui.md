@@ -10,6 +10,7 @@ FuzzTUI is a terminal user interface (TUI) for monitoring and managing the Fuzzw
 - View recent crashes
 - Navigate between schedulers
 - View running fuzzing tasks
+- Display coverage reports per task (when coverage is enabled)
 
 ## Architecture
 
@@ -69,6 +70,7 @@ The user interface displays:
   - Scheduler information (name, status, info, state file path)
   - Task table with columns: SHA, FileName, Status, StatusTime
   - Task management menu (when scheduler is running)
+  - **Coverage view**: Per-task coverage report (summary table and line-by-line file view) when coverage is enabled for the scheduler
 
 ### Threads
 
@@ -104,6 +106,7 @@ cargo run -p fuzztui -- config.json
 
 ### Scheduler Tabs
 - **Up/Down**: Navigate through tasks in the table
+- **D**: Display coverage for the selected task (only when scheduler is running and task has coverage)
 - **M**: Open task management menu (only when scheduler is running)
   - **Up/Down**: Navigate menu options
   - **Enter**: Execute selected action
@@ -121,6 +124,26 @@ When a task is selected and the scheduler is running, pressing **M** opens a con
   - **START**: Start the task
 
 **Note**: If the scheduler is stopped, the interface is dimmed and task management is disabled. Navigation (Up/Down) still works to view tasks, but no interactions are possible.
+
+### Task Management Menu – DISPLAY COVERAGE
+
+When a task is selected and the scheduler is running, the menu includes:
+
+- **DISPLAY COVERAGE**: Open the coverage view for the selected task (requires coverage enabled and LLVM tools: `llvm-profdata`, `llvm-cov`).
+
+### Coverage View
+
+When coverage is displayed (key **D** or menu **DISPLAY COVERAGE**), a full-screen overlay shows:
+
+1. **Summary table**: Header row plus one row per source file with coverage (Regions, Functions, Lines, Branches). The first column is the file path.
+2. **Navigation**:
+   - **Up/Down**: Move selection in the summary table
+   - **Enter**: Open line-by-line coverage for the selected file
+   - **Esc** or **d**: Close coverage view and return to the scheduler tab
+
+3. **File view**: Line-by-line coverage for one source file. **Up/Down** scroll the content; **B** or **Esc** returns to the summary table.
+
+Coverage data is produced by the scheduler using `llvm-profdata` (merge of `.profraw` files) and `llvm-cov` (report/show). The scheduler must have `has_coverage: true` and a valid `coverage_directory` in its config.
 
 ## See Also
 

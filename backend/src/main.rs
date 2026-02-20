@@ -48,7 +48,7 @@ async fn main() {
     let log_file_path = "./logs/backend.log";
     // Ensure logs directory exists
     if let Err(e) = std::fs::create_dir_all("./logs") {
-        error!("Failed to create log directory './logs': {}", e);
+        error!("Failed to create log directory './logs': {e}");
         std::process::exit(1);
     }
 
@@ -56,7 +56,7 @@ async fn main() {
         .single_file(std::path::Path::new(log_file_path), true, LevelFilter::Info)
         .init()
     {
-        error!("Failed to initialize logger: {}", e);
+        error!("Failed to initialize logger: {e}");
         std::process::exit(1);
     }
 
@@ -70,7 +70,7 @@ async fn main() {
     {
         Ok(pool) => pool,
         Err(e) => {
-            error!("Failed to create database pool: {}", e);
+            error!("Failed to create database pool: {e}");
             std::process::exit(1);
         }
     };
@@ -95,22 +95,22 @@ async fn main() {
             "/admin_events/{id}/mark_processed",
             post(mark_admin_event_processed),
         )
-        .layer(DefaultBodyLimit::max(500 * 1000 * 1000))
+        .layer(DefaultBodyLimit::max(110 * 1024 * 1024))
         .with_state(pool);
 
-    let listener = match tokio::net::TcpListener::bind("0.0.0.0:3000").await {
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:3000").await {
         Ok(listener) => {
-            info!("Backend listening on 0.0.0.0:3000");
+            info!("Backend listening on 127.0.0.1:3000");
             listener
         }
         Err(e) => {
-            error!("Failed to bind to 0.0.0.0:3000: {}", e);
+            error!("Failed to bind to 127.0.0.1:3000: {e}");
             std::process::exit(1);
         }
     };
 
     if let Err(e) = axum::serve(listener, app).await {
-        error!("Server error: {}", e);
+        error!("Server error: {e}");
         std::process::exit(1);
     }
 }
@@ -153,7 +153,7 @@ async fn get_crashes(
 ) -> Result<Json<Vec<CrashReportWithId>>, StatusCode> {
     // Obtenir une connexion du pool
     let mut conn = pool.get().map_err(|e| {
-        error!("Failed to get DB connection from pool: {}", e);
+        error!("Failed to get DB connection from pool: {e}");
         StatusCode::SERVICE_UNAVAILABLE
     })?;
 
@@ -161,7 +161,7 @@ async fn get_crashes(
         .select(CrashReportWithId::as_select())
         .get_results::<CrashReportWithId>(&mut conn)
         .map_err(|e| {
-            error!("Database query failed: {}", e);
+            error!("Database query failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
@@ -170,7 +170,7 @@ async fn get_crashes(
 
 async fn get_last_crash(State(pool): State<DbPool>) -> Result<Json<CrashReportWithId>, StatusCode> {
     let mut conn = pool.get().map_err(|e| {
-        error!("Failed to get DB connection from pool: {}", e);
+        error!("Failed to get DB connection from pool: {e}");
         StatusCode::SERVICE_UNAVAILABLE
     })?;
 
@@ -180,7 +180,7 @@ async fn get_last_crash(State(pool): State<DbPool>) -> Result<Json<CrashReportWi
         .limit(1)
         .get_result::<CrashReportWithId>(&mut conn)
         .map_err(|e| {
-            error!("Database query failed: {}", e);
+            error!("Database query failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
@@ -192,10 +192,10 @@ async fn get_last_n_crashes(
     axum::extract::Path(number): axum::extract::Path<i64>,
 ) -> Result<Json<Vec<CrashReportWithId>>, StatusCode> {
     let mut conn = pool.get().map_err(|e| {
-        error!("Failed to get DB connection from pool: {}", e);
+        error!("Failed to get DB connection from pool: {e}");
         StatusCode::SERVICE_UNAVAILABLE
     })?;
-    info!("Getting last {} crashes", number);
+    info!("Getting last {number} crashes");
 
     let crashes = crashes::table
         .select(CrashReportWithId::as_select())
@@ -203,7 +203,7 @@ async fn get_last_n_crashes(
         .limit(number)
         .get_results::<CrashReportWithId>(&mut conn)
         .map_err(|e| {
-            error!("Database query failed: {}", e);
+            error!("Database query failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
@@ -212,7 +212,7 @@ async fn get_last_n_crashes(
 
 async fn get_crashes_count(State(pool): State<DbPool>) -> Result<Json<i64>, StatusCode> {
     let mut conn = pool.get().map_err(|e| {
-        error!("Failed to get DB connection from pool: {}", e);
+        error!("Failed to get DB connection from pool: {e}");
         StatusCode::SERVICE_UNAVAILABLE
     })?;
 
@@ -220,7 +220,7 @@ async fn get_crashes_count(State(pool): State<DbPool>) -> Result<Json<i64>, Stat
         .count()
         .get_result::<i64>(&mut conn)
         .map_err(|e| {
-            error!("Database query failed: {}", e);
+            error!("Database query failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
@@ -271,7 +271,7 @@ async fn upload_crash(
 
     // Obtenir une connexion du pool
     let mut conn = pool.get().map_err(|e| {
-        error!("Failed to get DB connection: {}", e);
+        error!("Failed to get DB connection: {e}");
         (
             StatusCode::SERVICE_UNAVAILABLE,
             "Database unavailable".to_string(),
@@ -285,11 +285,11 @@ async fn upload_crash(
         .get_results::<i32>(&mut conn)
     {
         Ok(ids) => {
-            info!("Crash uploaded with ids: {:?}", ids);
+            info!("Crash uploaded with ids: {ids:?}");
             Ok(StatusCode::CREATED)
         }
         Err(e) => {
-            error!("Failed to insert crash: {}", e);
+            error!("Failed to insert crash: {e}");
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Database error".to_string(),
@@ -304,7 +304,7 @@ async fn get_crash_by_id(
     axum::extract::Path(id): axum::extract::Path<i32>,
 ) -> Result<Json<CrashReportWithId>, StatusCode> {
     let mut conn = pool.get().map_err(|e| {
-        error!("Failed to get DB connection from pool: {}", e);
+        error!("Failed to get DB connection from pool: {e}");
         StatusCode::SERVICE_UNAVAILABLE
     })?;
 
@@ -316,7 +316,7 @@ async fn get_crash_by_id(
         Ok(crash) => Ok(Json(crash)),
         Err(diesel::result::Error::NotFound) => Err(StatusCode::NOT_FOUND),
         Err(e) => {
-            error!("Database query failed: {}", e);
+            error!("Database query failed: {e}");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -327,7 +327,7 @@ async fn collect_crashes(
     Json(id): Json<i32>,
 ) -> Result<(StatusCode, Json<String>), StatusCode> {
     let mut conn = pool.get().map_err(|e| {
-        error!("Failed to get DB connection from pool: {}", e);
+        error!("Failed to get DB connection from pool: {e}");
         StatusCode::SERVICE_UNAVAILABLE
     })?;
 
@@ -337,7 +337,7 @@ async fn collect_crashes(
         .get_result::<CrashReport>(&mut conn)
         .optional()
         .map_err(|e| {
-            error!("Database query failed: {}", e);
+            error!("Database query failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
@@ -358,17 +358,21 @@ async fn collect_crashes(
         .file_stem()
         .unwrap_or_default()
         .to_string_lossy()
-        .into_owned();
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect::<String>();
 
-    let dir_name = format!(
-        "/tmp/tmp_{}_{}",
-        crash.created_at.format("%Y-%m-%dT%H-%M-%S"),
-        stem
-    );
+    if stem.is_empty() {
+        error!("Invalid filename in crash record id={id}");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    let created_fmt = crash.created_at.format("%Y-%m-%dT%H-%M-%S");
+    let dir_name = format!("/tmp/tmp_{created_fmt}_{stem}");
 
     // Create directory
     fs::create_dir_all(&dir_name).map_err(|e| {
-        error!("Failed to create directory {}: {}", dir_name, e);
+        error!("Failed to create directory {dir_name}: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
@@ -378,17 +382,17 @@ async fn collect_crashes(
 
     // Write files
     fs::write(&program_path, &crash.program).map_err(|e| {
-        error!("Failed to write program file: {}", e);
+        error!("Failed to write program file: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
     fs::write(&report_path, &crash.report).map_err(|e| {
-        error!("Failed to write report file: {}", e);
+        error!("Failed to write report file: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
     fs::write(&input_path, &crash.input).map_err(|e| {
-        error!("Failed to write input file: {}", e);
+        error!("Failed to write input file: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
@@ -449,7 +453,7 @@ async fn create_admin_event(
     // Validate and serialize JSON metadata
     let metadata_str = if let Some(ref metadata) = event.metadata {
         let metadata_json = serde_json::to_string(metadata).map_err(|e| {
-            error!("Failed to serialize metadata: {}", e);
+            error!("Failed to serialize metadata: {e}");
             (
                 StatusCode::BAD_REQUEST,
                 "Invalid metadata format".to_string(),
@@ -473,7 +477,7 @@ async fn create_admin_event(
     };
 
     let mut conn = pool.get().map_err(|e| {
-        error!("Failed to get DB connection: {}", e);
+        error!("Failed to get DB connection: {e}");
         (
             StatusCode::SERVICE_UNAVAILABLE,
             "Database unavailable".to_string(),
@@ -490,11 +494,11 @@ async fn create_admin_event(
         .get_results::<i32>(&mut conn)
     {
         Ok(ids) => {
-            info!("Admin event created with id: {:?}", ids);
+            info!("Admin event created with id: {ids:?}");
             Ok(StatusCode::CREATED)
         }
         Err(e) => {
-            error!("Failed to insert admin event: {}", e);
+            error!("Failed to insert admin event: {e}");
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Database error".to_string(),
@@ -507,7 +511,7 @@ async fn get_unprocessed_admin_events(
     State(pool): State<DbPool>,
 ) -> Result<Json<Vec<AdminEvent>>, StatusCode> {
     let mut conn = pool.get().map_err(|e| {
-        error!("Failed to get DB connection from pool: {}", e);
+        error!("Failed to get DB connection from pool: {e}");
         StatusCode::SERVICE_UNAVAILABLE
     })?;
 
@@ -517,7 +521,7 @@ async fn get_unprocessed_admin_events(
         .order(admin_events::created_at.asc())
         .get_results::<AdminEvent>(&mut conn)
         .map_err(|e| {
-            error!("Database query failed: {}", e);
+            error!("Database query failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
@@ -529,7 +533,7 @@ async fn mark_admin_event_processed(
     axum::extract::Path(id): axum::extract::Path<i32>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let mut conn = pool.get().map_err(|e| {
-        error!("Failed to get DB connection: {}", e);
+        error!("Failed to get DB connection: {e}");
         (
             StatusCode::SERVICE_UNAVAILABLE,
             "Database unavailable".to_string(),
@@ -543,7 +547,7 @@ async fn mark_admin_event_processed(
         Ok(0) => Err((StatusCode::NOT_FOUND, "Event not found".to_string())),
         Ok(_) => Ok(StatusCode::OK),
         Err(e) => {
-            error!("Failed to update admin event: {}", e);
+            error!("Failed to update admin event: {e}");
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Database error".to_string(),
@@ -563,7 +567,7 @@ async fn get_crash_ids(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Vec<CrashId>>, StatusCode> {
     let mut conn = pool.get().map_err(|e| {
-        error!("Failed to get DB connection from pool: {}", e);
+        error!("Failed to get DB connection from pool: {e}");
         StatusCode::SERVICE_UNAVAILABLE
     })?;
 
@@ -586,7 +590,7 @@ async fn get_crash_ids(
         .order(crashes::created_at.asc())
         .get_results::<(i32, NaiveDateTime)>(&mut conn)
         .map_err(|e| {
-            error!("Database query failed: {}", e);
+            error!("Database query failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .into_iter()

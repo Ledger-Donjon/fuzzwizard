@@ -98,7 +98,7 @@ fn load_or_init_last_crash_date(
             }
             Err(e) => {
                 // If we can't fetch the last crash, use a default date
-                error!("Failed to fetch last crash: {}, using default date", e);
+                error!("Failed to fetch last crash: {e}, using default date");
                 chrono::NaiveDate::from_ymd_opt(2025, 1, 1)
                     .and_then(|d| d.and_hms_opt(0, 0, 0))
                     .context("Failed to create default date")?
@@ -113,7 +113,7 @@ fn load_or_init_last_crash_date(
     // If we initialized from last crash, save it to the state file
     if contents.trim().is_empty() {
         if let Err(e) = save_last_crash_date(date, state_file_path) {
-            error!("Failed to save initial crash date: {}", e);
+            error!("Failed to save initial crash date: {e}");
         }
     }
 
@@ -147,7 +147,7 @@ fn save_last_crash_date(date: NaiveDateTime, state_file_path: &str) -> Result<()
 
 /// Fetch crash by ID
 fn fetch_crash_by_id(client: &reqwest::blocking::Client, crash_id: i32) -> Result<CrashReport> {
-    let url = Url::parse(&format!("http://127.0.0.1:3000/crashes/{}", crash_id))
+    let url = Url::parse(&format!("http://127.0.0.1:3000/crashes/{crash_id}"))
         .context("Invalid backend URL")?;
 
     let mut headers_backend = HeaderMap::new();
@@ -243,8 +243,7 @@ fn fetch_unprocessed_admin_events(client: &reqwest::blocking::Client) -> Result<
 /// Mark an admin event as processed
 fn mark_admin_event_processed(client: &reqwest::blocking::Client, event_id: i32) -> Result<()> {
     let url = Url::parse(&format!(
-        "http://127.0.0.1:3000/admin_events/{}/mark_processed",
-        event_id
+        "http://127.0.0.1:3000/admin_events/{event_id}/mark_processed"
     ))
     .context("Invalid backend URL")?;
 
@@ -283,7 +282,7 @@ fn main() -> Result<()> {
         .init()
         .context("Failed to initialize logger")?;
 
-    info!("Notificator started with config from: {:?}", config_path);
+    info!("Notificator started with config from: {config_path:?}");
     info!("Using logdir: {}", config.logdir);
     info!(
         "Using state file: {}",
@@ -332,7 +331,7 @@ fn main() -> Result<()> {
     let mut last_notified_crash_date = load_or_init_last_crash_date(&state_file_path, &client)
         .context("Failed to load or initialize last crash date")?;
 
-    info!("Starting from crash date: {}", last_notified_crash_date);
+    info!("Starting from crash date: {last_notified_crash_date}");
 
     loop {
         // Fetch crash IDs since the last notified crash date
@@ -376,16 +375,16 @@ fn main() -> Result<()> {
                     if latest_date > last_notified_crash_date {
                         last_notified_crash_date = latest_date;
                         if let Err(e) = save_last_crash_date(latest_date, &state_file_path) {
-                            error!("Failed to save last crash date: {}", e);
+                            error!("Failed to save last crash date: {e}");
                             // Continue anyway
                         } else {
-                            info!("Updated last notified crash date to: {}", latest_date);
+                            info!("Updated last notified crash date to: {latest_date}");
                         }
                     }
                 }
             }
             Err(e) => {
-                error!("Failed to fetch crash IDs: {}", e);
+                error!("Failed to fetch crash IDs: {e}");
                 // Continue loop
             }
         }
@@ -422,7 +421,7 @@ fn main() -> Result<()> {
                 }
             }
             Err(e) => {
-                error!("Failed to fetch admin events: {}", e);
+                error!("Failed to fetch admin events: {e}");
                 // Continue loop
             }
         }
