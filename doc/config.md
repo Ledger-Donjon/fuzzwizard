@@ -198,6 +198,7 @@ Each scheduler has its own configuration file that defines what to fuzz and how.
   "scheduler_name": "...",
   "targets_directory": [...],
   "build_script": "...",
+  "build_script_interval_hours": null,
   "backend_url": "...",
   "corpus_directory": "...",
   "crashes_directory": "...",
@@ -253,6 +254,16 @@ Path to the script that builds the fuzzer targets.
 **Example**: `"/opt/fuzzwizard/scripts/build.sh"`
 
 **Note**: Path must be absolute and the script must be executable.
+
+#### `build_script_interval_hours` (number, optional)
+
+Minimum time between two runs of `build_script`, in whole hours.
+
+- If omitted or `null`, the build script runs on **every** scheduler refresh (FuzzTUI periodic update) or on **every** loop iteration (standalone `scheduler` binary, every 60 seconds).
+- If set to a **positive** integer (e.g. `6`), `build_script` runs at most once per that many hours; intermediate updates still refresh targets and tasks, but skip rebuilding until the interval has elapsed.
+- `0` is treated like omitted: no hourly throttling.
+
+**Example**: `"build_script_interval_hours": 24` for at most one build per day.
 
 #### `backend_url` (string, required)
 
@@ -364,6 +375,7 @@ Path to the shared state file.
     "/opt/fuzzwizard/targets/project-b"
   ],
   "build_script": "/opt/fuzzwizard/scripts/build.sh",
+  "build_script_interval_hours": null,
   "backend_url": "http://127.0.0.1:3000",
   "corpus_directory": "/opt/fuzzwizard/corpus",
   "crashes_directory": "/opt/fuzzwizard/crashes",

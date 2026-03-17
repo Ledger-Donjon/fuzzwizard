@@ -55,6 +55,7 @@ pub struct SchedulerConfig {
     pub scheduler_name: String,
     pub targets_directory: Vec<String>,
     pub build_script: String,
+    pub build_script_interval_hours: Option<u64>,
     pub backend_url: String,
     pub corpus_directory: String,
     pub crashes_directory: String,

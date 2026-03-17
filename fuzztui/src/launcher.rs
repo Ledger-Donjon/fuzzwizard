@@ -469,16 +469,22 @@ fn build_targets(
     last_build_at: Option<Instant>,
     backend_url: &str,
 ) -> Option<Instant> {
-    // Run build_script in background thread (non-blocking)
     let now = Instant::now();
     let scheduler_name = config_json.scheduler_name.clone();
     let build_script = config_json.build_script.clone();
 
-    if last_build_at.is_some()
-        && now.duration_since(last_build_at.unwrap()) < Duration::from_secs(600)
-    {
-        info!("Build script already ran recently, skipping");
-        return last_build_at;
+    if let Some(hours) = config_json.build_script_interval_hours {
+        if hours > 0 {
+            let min_interval = Duration::from_secs(hours.saturating_mul(3600));
+            let prev = last_build_at.unwrap_or(now);
+            if now.duration_since(prev) < min_interval {
+                info!(
+                    "Skipping build_script for {} ({}h interval not elapsed)",
+                    config_json.scheduler_name, hours
+                );
+                return Some(prev);
+            }
+        }
     }
 
     // Log the script being executed for audit purposes
@@ -508,7 +514,6 @@ fn build_targets(
         }
     }
 
-    // Return immediately with current time, build happens in background
     Some(now)
 }
 

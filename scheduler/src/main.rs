@@ -10,20 +10,37 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-fn build_targets(config_json: scheduler::SchedulerConfig) {
+use std::time::{Duration, Instant};
+
+fn build_targets(
+    config_json: scheduler::SchedulerConfig,
+    last_build_at: Option<Instant>,
+) -> Option<Instant> {
+    let now = Instant::now();
+
+    if let Some(hours) = config_json.build_script_interval_hours {
+        if hours > 0 {
+            let min_interval = Duration::from_secs(hours.saturating_mul(3600));
+            if let Some(prev) = last_build_at {
+                if now.duration_since(prev) < min_interval {
+                    return last_build_at;
+                }
+            }
+        }
+    }
     // Validate build script for security
     let build_script = &config_json.build_script;
 
     // Check script is not empty
     if build_script.trim().is_empty() {
         error!("Build script is empty, refusing to execute");
-        return;
+        return last_build_at;
     }
 
     // Check for null bytes
     if build_script.contains('\0') {
         error!("Build script contains null bytes, refusing to execute");
-        return;
+        return last_build_at;
     }
 
     // Check script length (max 64KB)
@@ -32,7 +49,7 @@ fn build_targets(config_json: scheduler::SchedulerConfig) {
             "Build script too long ({} bytes), refusing to execute",
             build_script.len()
         );
-        return;
+        return last_build_at;
     }
 
     // Check for dangerous shell patterns that could indicate command injection
@@ -74,6 +91,8 @@ fn build_targets(config_json: scheduler::SchedulerConfig) {
             error!("Failed to run build_script: {e}");
         }
     }
+
+    Some(now)
 }
 fn main() {
     let config_path = env::args().nth(1);
@@ -146,7 +165,8 @@ fn main() {
             .map(PathBuf::from)
             .collect(),
     );
-    build_targets(config_json.clone());
+    let mut last_build_at: Option<Instant> = None;
+    last_build_at = build_targets(config_json.clone(), last_build_at);
     let mut scheduler = Scheduler::new(
         collector,
         config_json.clone(),
@@ -154,7 +174,7 @@ fn main() {
     );
 
     loop {
-        build_targets(config_json.clone());
+        last_build_at = build_targets(config_json.clone(), last_build_at);
         let _ = scheduler.update(&logdir);
         std::thread::sleep(std::time::Duration::from_secs(60));
         scheduler.report_crashes().unwrap();

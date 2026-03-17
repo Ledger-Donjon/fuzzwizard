@@ -43,6 +43,7 @@ fn directory_collector() {
     let config = SchedulerConfig {
         targets_directory: vec![temp_dir.to_path_buf().to_string_lossy().into()],
         build_script: "".to_string(),
+        build_script_interval_hours: None,
         scheduler_name: "test_scheduler".to_string(),
         corpus_directory: std::env::temp_dir().to_string_lossy().into(),
         crashes_directory: std::env::temp_dir()
