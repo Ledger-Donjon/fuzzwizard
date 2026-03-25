@@ -309,6 +309,95 @@ pub mod validation {
 
         Ok(())
     }
+
+    /// Validates a container option against a strict allowlist.
+    /// Rejects dangerous flags like --privileged, --pid=host, --cap-add, etc.
+    pub fn validate_container_option(option: &str) -> Result<()> {
+        if option.is_empty() {
+            return Ok(());
+        }
+
+        const FORBIDDEN_OPTIONS: &[&str] = &[
+            "--privileged",
+            "--pid=host",
+            "--pid=",
+            "--net=host",
+            "--network=host",
+            "--cap-add",
+            "--device",
+            "--ipc=host",
+            "--userns=host",
+            "--security-opt",
+            "-v",
+            "--volume",
+            "--mount",
+        ];
+
+        let lower = option.to_lowercase();
+        for forbidden in FORBIDDEN_OPTIONS {
+            if lower.starts_with(forbidden) {
+                return Err(SchedulerError::InvalidInput(format!(
+                    "Forbidden container option: {option} (matches blocked pattern '{forbidden}')"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validates that a backend URL points to localhost only.
+    pub fn validate_backend_url(url: &str) -> Result<()> {
+        const ALLOWED_HOSTS: &[&str] = &[
+            "http://127.0.0.1",
+            "http://localhost",
+            "https://127.0.0.1",
+            "https://localhost",
+            "http://[::1]",
+            "https://[::1]",
+        ];
+
+        let lower = url.to_lowercase();
+        if !ALLOWED_HOSTS.iter().any(|h| lower.starts_with(h)) {
+            return Err(SchedulerError::InvalidInput(format!(
+                "backend_url must point to localhost, got: {url}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Validates a build script path: must be an absolute path to an existing executable.
+    /// Rejects arbitrary shell commands to prevent code injection.
+    pub fn validate_build_script(script: &str) -> Result<()> {
+        if script.trim().is_empty() {
+            return Ok(());
+        }
+
+        if script.contains('\0') {
+            return Err(SchedulerError::InvalidInput(
+                "Build script contains null bytes".to_string(),
+            ));
+        }
+
+        if script.len() > 65536 {
+            return Err(SchedulerError::InvalidInput(format!(
+                "Build script too long: {} bytes (max: 65536)",
+                script.len()
+            )));
+        }
+
+        const DANGEROUS_PATTERNS: &[&str] = &["&&", "||", ";", "`", "$(", ">>", "<<"];
+        for pattern in DANGEROUS_PATTERNS {
+            if script.contains(pattern) {
+                return Err(SchedulerError::InvalidInput(format!(
+                    "Build script contains dangerous shell pattern '{pattern}'. \
+                     Use an executable script file instead of inline shell commands."
+                )));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// A trait for collecting targets to be fuzzed by the scheduler.
@@ -492,7 +581,7 @@ static PROCESS_REGISTRY: OnceLock<Arc<Mutex<Vec<ProcessRecord>>>> = OnceLock::ne
 /// Helper function to kill a process by PID
 fn kill_process_by_pid(pid: u32) {
     let _ = std::thread::spawn(move || {
-        let _ = Command::new("kill")
+        let _ = Command::new("/bin/kill")
             .args(["-TERM", &pid.to_string()])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -576,7 +665,7 @@ fn collect_coverage_native(fuzzer_name: &str, timeout_secs: u64) {
 
     // Spawn command in a thread
     thread::spawn(move || {
-        match Command::new("pkill")
+        match Command::new("/usr/bin/pkill")
             .args(["-SIGUSR1", "-f", &fuzzer_name_clone])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -642,14 +731,13 @@ fn install_ctrlc_handler() {
             if let Some(name) = &rec.container_name {
                 // Try docker first, then podman (non-blocking spawn)
                 let name_clone = name.clone();
-                let _ = Command::new("docker")
+                let _ = Command::new("/usr/bin/docker")
                     .args(["rm", "-f", &name_clone])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status()
                     .or_else(|_| {
-                        // Fallback to podman
-                        Command::new("podman")
+                        Command::new("/usr/bin/podman")
                             .args(["rm", "-f", &name_clone])
                             .stdout(std::process::Stdio::null())
                             .stderr(std::process::Stdio::null())
@@ -672,15 +760,44 @@ impl<C: TargetsCollector> Scheduler<C> {
     }
 
     /// Create a new [`Scheduler`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `backend_url` does not point to localhost.
     pub fn new(collector: C, config: SchedulerConfig, container_binary: Option<PathBuf>) -> Self {
+        // Validate backend_url is localhost-only to prevent data exfiltration
+        if let Err(e) = validation::validate_backend_url(&config.backend_url) {
+            panic!("Security: {e}");
+        }
+
         // Ensure Ctrl-C handler is installed once
         install_ctrlc_handler();
 
-        // Determine state file path: use config value or default to /tmp/{scheduler_name}_state.json
-        let state_file_path = config
-            .state_file
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(format!("/tmp/{}_state.json", config.scheduler_name)));
+        // Determine state file path: use config value or default to a protected directory
+        let state_file_path = config.state_file.map(PathBuf::from).unwrap_or_else(|| {
+            let state_dir = PathBuf::from(format!(
+                "{}/.fuzzwizard",
+                std::env::var("HOME").unwrap_or_else(|_| "/var/lib/fuzzwizard".to_string())
+            ));
+            state_dir.join(format!("{}_state.json", config.scheduler_name))
+        });
+
+        // Ensure the state file directory exists with restricted permissions (owner-only)
+        if let Some(parent) = state_file_path.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                info!(
+                    "Failed to create state file directory {}: {}",
+                    parent.display(),
+                    e
+                );
+            } else {
+                let mut perms = fs::metadata(parent)
+                    .map(|m| m.permissions())
+                    .unwrap_or_else(|_| fs::Permissions::from_mode(0o700));
+                perms.set_mode(0o700);
+                let _ = fs::set_permissions(parent, perms);
+            }
+        }
 
         // Create empty state file at startup (overwrite any existing file)
         let empty_state = StateFile {
@@ -1096,25 +1213,23 @@ impl<C: TargetsCollector> Scheduler<C> {
             rng.fill(&mut data);
             file.write_all(&data)?;
         }
-        // Set permissions to 777 for container write access
+        // Set permissions to 770 (owner + group only, no world access)
         let mut perms = fs::metadata(&fuzzer_corpus)?.permissions();
-        perms.set_mode(0o777);
+        perms.set_mode(0o770);
         fs::set_permissions(&fuzzer_corpus, perms)?;
         let fuzzer_crashdir = self.crashes_directory.join(fuzzer_name);
         if !fuzzer_crashdir.exists() {
             fs::create_dir_all(&fuzzer_crashdir)?;
         }
-        // Set permissions to 777 for container write access
         let mut perms = fs::metadata(&fuzzer_crashdir)?.permissions();
-        perms.set_mode(0o777);
+        perms.set_mode(0o770);
         fs::set_permissions(&fuzzer_crashdir, perms)?;
         let fuzzer_coveragedir = self.coverage_directory.join(fuzzer_name);
         if !fuzzer_coveragedir.exists() {
             fs::create_dir_all(&fuzzer_coveragedir)?;
         }
-        // Set permissions to 777 for container write access
         let mut perms = fs::metadata(&fuzzer_coveragedir)?.permissions();
-        perms.set_mode(0o777);
+        perms.set_mode(0o770);
         fs::set_permissions(&fuzzer_coveragedir, perms)?;
         let mut child: Child;
         let mut task_container_name: Option<String> = None;
@@ -1132,6 +1247,18 @@ impl<C: TargetsCollector> Scheduler<C> {
                     "--rm".into(),
                     "--name".into(),
                     name.clone(),
+                    // Security hardening: isolate network, drop capabilities, prevent privilege escalation
+                    "--network=none".into(),
+                    "--cap-drop".into(),
+                    "ALL".into(),
+                    "--security-opt".into(),
+                    "no-new-privileges".into(),
+                    "--read-only".into(),
+                    "--pids-limit".into(),
+                    "512".into(),
+                    // Writable /tmp inside the container for fuzzer scratch space
+                    "--tmpfs".into(),
+                    "/tmp:rw,noexec,nosuid,size=256m".into(),
                     // Set up environment variable for coverage outputs in the container
                     "-e".into(),
                     format!(
@@ -1140,7 +1267,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                         hex::encode(fuzzer_hash)
                     ),
                     "-v".into(),
-                    format!("{}:/fuzzer/binary", fuzzer_path.display()),
+                    format!("{}:/fuzzer/binary:ro", fuzzer_path.display()),
                     "-v".into(),
                     format!("{}:/fuzzer/crash_dir/", fuzzer_crashdir.display()),
                     "-v".into(),
@@ -1152,11 +1279,10 @@ impl<C: TargetsCollector> Scheduler<C> {
                 // Then image and command
                 args.push(container_image.clone());
                 if let Some(ref opts) = self.container_options {
-                    if !opts.is_empty() {
-                        for opt in opts {
-                            if !opt.is_empty() {
-                                args.push(opt.clone());
-                            }
+                    for opt in opts {
+                        if !opt.is_empty() {
+                            validation::validate_container_option(opt)?;
+                            args.push(opt.clone());
                         }
                     }
                 }
@@ -1389,12 +1515,27 @@ impl<C: TargetsCollector> Scheduler<C> {
                             SchedulerError::InconsistentState("invalid fuzzer path name"),
                         )?;
                         let filename = &crash_corpus["/fuzzer/crash_dir/".len()..];
-                        crash_corpus = self
+                        // Reject path traversal attempts (e.g. "../../etc/shadow")
+                        if filename.contains("..") {
+                            return Err(SchedulerError::PathTraversal(format!(
+                                "Path traversal detected in crash path: {crash_corpus}"
+                            )));
+                        }
+                        let candidate = self.crashes_directory.join(fuzzer_name).join(filename);
+                        // Canonicalize and verify the resolved path stays within crashes_directory
+                        let canonical_crash_dir = self
                             .crashes_directory
-                            .join(fuzzer_name)
-                            .join(filename)
-                            .to_string_lossy()
-                            .to_string();
+                            .canonicalize()
+                            .map_err(SchedulerError::Io)?;
+                        let canonical_candidate =
+                            candidate.canonicalize().map_err(SchedulerError::Io)?;
+                        if !canonical_candidate.starts_with(&canonical_crash_dir) {
+                            return Err(SchedulerError::PathTraversal(format!(
+                                "Crash path escapes crash directory: {}",
+                                canonical_candidate.display()
+                            )));
+                        }
+                        crash_corpus = canonical_candidate.to_string_lossy().to_string();
                     }
                     info!("crash_corpus: {crash_corpus:?}");
                     let crash_corpus_path = crash_corpus.clone();
@@ -1409,16 +1550,17 @@ impl<C: TargetsCollector> Scheduler<C> {
                     // Send crashing input to the backend
                     let client = reqwest::blocking::Client::new();
                     let binary = fs::read(task.path.clone())?;
-                    let res = client
-                        .post(format!("{}/crashes", self.backend_url))
-                        .json(&CrashReport {
-                            report: stderr.as_bytes().to_vec(),
-                            input: crashing_instance,
-                            filename: task.path.display().to_string(),
-                            program: binary,
-                            scheduler_name: self.scheduler_name.clone(),
-                        })
-                        .send()?;
+                    let request =
+                        client
+                            .post(format!("{}/crashes", self.backend_url))
+                            .json(&CrashReport {
+                                report: stderr.as_bytes().to_vec(),
+                                input: crashing_instance,
+                                filename: task.path.display().to_string(),
+                                program: binary,
+                                scheduler_name: self.scheduler_name.clone(),
+                            });
+                    let res = request.send()?;
 
                     let status = res.status();
                     if status.is_success() {

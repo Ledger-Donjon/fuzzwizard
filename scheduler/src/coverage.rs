@@ -31,7 +31,7 @@ fn merge_profraw_to_temp(profraw_files: &[PathBuf]) -> Result<(PathBuf, TempDirG
         .map(|p| p.to_string_lossy().to_string())
         .collect();
 
-    let output = Command::new("llvm-profdata")
+    let output = Command::new("/usr/bin/llvm-profdata")
         .args(["merge", "-sparse"])
         .args(&profraw_paths)
         .arg("-o")
@@ -106,7 +106,7 @@ fn run_coverage_report(profraw_files: &[PathBuf], binary_path: &Path) -> String 
         Err(e) => return e,
     };
 
-    let output = match Command::new("llvm-cov")
+    let output = match Command::new("/usr/bin/llvm-cov")
         .args(["report"])
         .arg(binary_path)
         .arg("-instr-profile")
@@ -164,7 +164,7 @@ fn get_file_coverage_inner(
 
     // Run llvm-cov show without file filter (no -include-filename-regex: not supported on all LLVM versions),
     // then extract only the section for the requested file from the text output.
-    let output = match Command::new("llvm-cov")
+    let output = match Command::new("/usr/bin/llvm-cov")
         .args(["show", "-instr-profile"])
         .arg(&merged_profdata)
         .arg(binary_path)
