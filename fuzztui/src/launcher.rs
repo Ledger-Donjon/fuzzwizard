@@ -108,27 +108,16 @@ impl Launcher {
             panic!("schedulers array in config.json must not be empty");
         }
 
-        // Spawn backend with --database-url argument from config
+        // Spawn backend with DATABASE_URL passed via environment variable (not CLI args)
+        let db_url = self.config_json.database_url.clone();
         let (backend_cmd, backend_args) =
             if let Some(ref backend_binary) = self.config_json.backend_binary {
-                // Use release binary if specified
-                let args: Vec<String> = vec![
-                    "--database-url".to_string(),
-                    self.config_json.database_url.clone(),
-                ];
-                (backend_binary.clone(), args)
+                (backend_binary.clone(), Vec::new())
             } else {
-                // Fallback to cargo run
-                let args = vec![
-                    "run".to_string(),
-                    "-p".to_string(),
-                    "backend".to_string(),
-                    "--".to_string(),
-                    "--database-url".to_string(),
-                    self.config_json.database_url.clone(),
-                ];
+                let args = vec!["run".to_string(), "-p".to_string(), "backend".to_string()];
                 ("cargo".to_string(), args)
             };
+        let backend_env: Vec<(&str, &str)> = vec![("DATABASE_URL", db_url.as_str())];
         self.procs.push(spawn_process(
             "backend",
             &backend_cmd,
@@ -136,6 +125,7 @@ impl Launcher {
                 .iter()
                 .map(|s| s.as_str())
                 .collect::<Vec<&str>>(),
+            &backend_env,
         ));
         info!("backend launched");
         send_admin_event_to_backend(&self.backend_url, "backend_launched", "Backend launched");
@@ -158,6 +148,7 @@ impl Launcher {
                 ];
                 ("cargo".to_string(), args)
             };
+        let notificator_env: Vec<(&str, &str)> = Vec::new();
         self.procs.push(spawn_process(
             "notificator",
             &notificator_cmd,
@@ -165,6 +156,7 @@ impl Launcher {
                 .iter()
                 .map(|s| s.as_str())
                 .collect::<Vec<&str>>(),
+            &notificator_env,
         ));
         info!("notificator launched");
 
@@ -446,13 +438,22 @@ impl SchedulerProcess {
     }
 }
 
-fn spawn_process(name: &str, cmd: &str, args: &[&str]) -> ManagedProcess {
+fn spawn_process(
+    name: &str,
+    cmd: &str,
+    args: &[&str],
+    env_vars: &[(&str, &str)],
+) -> ManagedProcess {
     let mut command = Command::new(cmd);
     command
         .args(args)
-        .stdout(Stdio::null()) // Redirect stdout to /dev/null to avoid breaking TUI
-        .stderr(Stdio::null()) // Redirect stderr to /dev/null to avoid breaking TUI
-        .env("RUST_LOG", "error"); // Only show errors, not info logs
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("RUST_LOG", "error");
+
+    for (key, value) in env_vars {
+        command.env(key, value);
+    }
 
     let child = command.spawn().expect("failed to spawn process");
     ManagedProcess {
@@ -487,12 +488,19 @@ fn build_targets(
         }
     }
 
-    // Log the script being executed for audit purposes
+    if let Err(e) = scheduler::validation::validate_build_script(&build_script) {
+        error!("Build script rejected for {scheduler_name}: {e}");
+        send_admin_event_to_backend(
+            backend_url,
+            "build_error",
+            &format!("Build script rejected: {e}"),
+        );
+        return None;
+    }
+
     info!("Executing build script for {scheduler_name}: {build_script}");
 
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(&build_script)
+    let status = Command::new(build_script.trim())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

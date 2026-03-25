@@ -204,6 +204,7 @@ Each scheduler has its own configuration file that defines what to fuzz and how.
   "crashes_directory": "...",
   "coverage_directory": "...",
   "has_coverage": true,
+  "llvm_bin_directory": null,
   "container_image": null,
   "container_options": null,
   "state_file": null
@@ -319,6 +320,15 @@ Enable or disable coverage collection.
 
 **Note**: Requires binaries to be compiled with coverage instrumentation (LLVM).
 
+#### `llvm_bin_directory` (string, optional)
+
+Directory that contains the LLVM tools `llvm-cov` and `llvm-profdata`, used when the scheduler analyzes coverage (FuzzTUI / API).
+
+- If omitted or `null`, the scheduler tries the environment variable `FUZZWIZARD_LLVM_BIN` (same semantics: directory path), then falls back to resolving those tool names from `PATH`.
+- Set this when LLVM is not on the default `PATH` (for example Homebrew: `/opt/homebrew/opt/llvm/bin`).
+
+**Example**: `"/opt/homebrew/opt/llvm/bin"`
+
 #### `container_image` (string, optional)
 
 Docker/Podman image to use for executing fuzzers.
@@ -381,6 +391,7 @@ Path to the shared state file.
   "crashes_directory": "/opt/fuzzwizard/crashes",
   "coverage_directory": "/opt/fuzzwizard/coverage",
   "has_coverage": true,
+  "llvm_bin_directory": null,
   "container_image": "fuzzing-image:latest",
   "container_options": [
     "--privileged"

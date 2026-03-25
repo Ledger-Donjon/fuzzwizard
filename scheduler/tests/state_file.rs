@@ -41,6 +41,7 @@ fn test_state_file_path() {
         container_image: None,
         container_options: None,
         has_coverage: false,
+        llvm_bin_directory: None,
         state_file: Some(state_file_path.to_string_lossy().into()),
     };
 
@@ -72,6 +73,7 @@ fn test_state_file_default_path() {
         container_image: None,
         container_options: None,
         has_coverage: false,
+        llvm_bin_directory: None,
         state_file: None,
     };
 
@@ -109,6 +111,7 @@ fn test_state_file_creation() {
         container_image: None,
         container_options: None,
         has_coverage: false,
+        llvm_bin_directory: None,
         state_file: Some(state_file_path.to_string_lossy().into()),
     };
 
@@ -156,6 +159,7 @@ fn test_state_file_write_and_read() {
         container_image: None,
         container_options: None,
         has_coverage: false,
+        llvm_bin_directory: None,
         state_file: Some(state_file_path.to_string_lossy().into()),
     };
 
@@ -221,6 +225,7 @@ done
         container_image: None,
         container_options: None,
         has_coverage: false,
+        llvm_bin_directory: None,
         state_file: Some(state_file_path.to_string_lossy().into()),
     };
 
@@ -281,6 +286,7 @@ fn test_state_file_with_env_and_options() {
         container_image: None,
         container_options: None,
         has_coverage: false,
+        llvm_bin_directory: None,
         state_file: Some(state_file_path.to_string_lossy().into()),
     };
 

@@ -6,6 +6,25 @@ use std::process::Command;
 
 use crate::Sha;
 
+/// Resolve LLVM tool binary: config directory first, then `FUZZWIZARD_LLVM_BIN`, then `PATH`.
+/// Avoids hard-coded `/usr/bin/...` so coverage works across distros and architectures (e.g. Homebrew LLVM).
+fn llvm_tool(name: &str, config_bin_dir: Option<&Path>) -> String {
+    const ENV: &str = "FUZZWIZARD_LLVM_BIN";
+    if let Some(dir) = config_bin_dir {
+        let p = dir.join(name);
+        if p.is_file() {
+            return p.to_string_lossy().into_owned();
+        }
+    }
+    if let Ok(dir) = std::env::var(ENV) {
+        let p = Path::new(dir.trim()).join(name);
+        if p.is_file() {
+            return p.to_string_lossy().into_owned();
+        }
+    }
+    name.to_string()
+}
+
 /// Guard that removes the temp directory on drop.
 struct TempDirGuard(PathBuf);
 
@@ -17,7 +36,10 @@ impl Drop for TempDirGuard {
 
 /// Creates a unique temp dir, merges profraw files into `merged.profdata`, and returns the path
 /// plus a guard for cleanup.
-fn merge_profraw_to_temp(profraw_files: &[PathBuf]) -> Result<(PathBuf, TempDirGuard), String> {
+fn merge_profraw_to_temp(
+    profraw_files: &[PathBuf],
+    llvm_bin_dir: Option<&Path>,
+) -> Result<(PathBuf, TempDirGuard), String> {
     let temp_dir = std::env::temp_dir().join(format!(
         "fuzzwizard_coverage_{}_{:016x}",
         std::process::id(),
@@ -31,7 +53,7 @@ fn merge_profraw_to_temp(profraw_files: &[PathBuf]) -> Result<(PathBuf, TempDirG
         .map(|p| p.to_string_lossy().to_string())
         .collect();
 
-    let output = Command::new("llvm-profdata")
+    let output = Command::new(llvm_tool("llvm-profdata", llvm_bin_dir))
         .args(["merge", "-sparse"])
         .args(&profraw_paths)
         .arg("-o")
@@ -100,13 +122,17 @@ fn collect_profraw_and_binary(
 }
 
 /// Run llvm-cov report and return the report text.
-fn run_coverage_report(profraw_files: &[PathBuf], binary_path: &Path) -> String {
-    let (_guard, merged_profdata) = match merge_profraw_to_temp(profraw_files) {
+fn run_coverage_report(
+    profraw_files: &[PathBuf],
+    binary_path: &Path,
+    llvm_bin_dir: Option<&Path>,
+) -> String {
+    let (_guard, merged_profdata) = match merge_profraw_to_temp(profraw_files, llvm_bin_dir) {
         Ok((path, guard)) => (guard, path),
         Err(e) => return e,
     };
 
-    let output = match Command::new("llvm-cov")
+    let output = match Command::new(llvm_tool("llvm-cov", llvm_bin_dir))
         .args(["report"])
         .arg(binary_path)
         .arg("-instr-profile")
@@ -133,14 +159,19 @@ fn run_coverage_report(profraw_files: &[PathBuf], binary_path: &Path) -> String 
 
 /// Analyze coverage for a fuzzer. Returns the full summary report (header + llvm-cov report).
 /// The report text includes the list of files; the UI can parse it to show the file list.
-pub fn analyze_coverage(coverage_dir: &Path, binary_path: &Path, sha: &Sha) -> String {
+pub fn analyze_coverage(
+    coverage_dir: &Path,
+    binary_path: &Path,
+    sha: &Sha,
+    llvm_bin_directory: Option<&Path>,
+) -> String {
     let (profraw_files, binary_to_use) =
         match collect_profraw_and_binary(coverage_dir, binary_path, sha) {
             Ok(x) => x,
             Err(e) => return e,
         };
 
-    let report = run_coverage_report(&profraw_files, &binary_to_use);
+    let report = run_coverage_report(&profraw_files, &binary_to_use, llvm_bin_directory);
     let mut result = format!("Coverage Analysis for: {}\n", binary_path.display());
     result.push_str(&format!("Coverage Directory: {}\n", coverage_dir.display()));
     result.push_str(&format!("Profraw Files Found: {}\n", profraw_files.len()));
@@ -156,15 +187,16 @@ fn get_file_coverage_inner(
     profraw_files: &[PathBuf],
     binary_path: &Path,
     file_path: &Path,
+    llvm_bin_dir: Option<&Path>,
 ) -> String {
-    let (_guard, merged_profdata) = match merge_profraw_to_temp(profraw_files) {
+    let (_guard, merged_profdata) = match merge_profraw_to_temp(profraw_files, llvm_bin_dir) {
         Ok((path, guard)) => (guard, path),
         Err(e) => return e,
     };
 
     // Run llvm-cov show without file filter (no -include-filename-regex: not supported on all LLVM versions),
     // then extract only the section for the requested file from the text output.
-    let output = match Command::new("llvm-cov")
+    let output = match Command::new(llvm_tool("llvm-cov", llvm_bin_dir))
         .args(["show", "-instr-profile"])
         .arg(&merged_profdata)
         .arg(binary_path)
@@ -247,11 +279,17 @@ pub fn get_file_coverage(
     binary_path: &Path,
     sha: &Sha,
     file_path: &Path,
+    llvm_bin_directory: Option<&Path>,
 ) -> String {
     let (profraw_files, binary_to_use) =
         match collect_profraw_and_binary(coverage_dir, binary_path, sha) {
             Ok(x) => x,
             Err(e) => return e,
         };
-    get_file_coverage_inner(&profraw_files, &binary_to_use, file_path)
+    get_file_coverage_inner(
+        &profraw_files,
+        &binary_to_use,
+        file_path,
+        llvm_bin_directory,
+    )
 }

@@ -37,6 +37,7 @@ fn test_collect_coverage_disabled() {
         container_image: None,
         container_options: None,
         has_coverage: false,
+        llvm_bin_directory: None,
         state_file: None,
     };
 
@@ -66,6 +67,7 @@ fn test_collect_coverage_enabled_no_tasks() {
         container_image: None,
         container_options: None,
         has_coverage: true,
+        llvm_bin_directory: None,
         state_file: None,
     };
 
@@ -104,6 +106,7 @@ fn test_collect_coverage_enabled_with_tasks() {
         container_image: None,
         container_options: None,
         has_coverage: true,
+        llvm_bin_directory: None,
         state_file: None,
     };
 
@@ -143,6 +146,7 @@ fn test_collect_coverage_with_container() {
         container_image: Some("test-image".to_string()),
         container_options: None,
         has_coverage: true,
+        llvm_bin_directory: None,
         state_file: None,
     };
 

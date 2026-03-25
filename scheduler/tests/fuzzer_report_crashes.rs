@@ -69,6 +69,7 @@ done
         container_image: None,
         container_options: None,
         has_coverage: false,
+        llvm_bin_directory: None,
         state_file: None,
     };
 
@@ -115,6 +116,7 @@ fn test_report_crashes_with_no_tasks() {
         container_image: None,
         container_options: None,
         has_coverage: false,
+        llvm_bin_directory: None,
         state_file: None,
     };
 
