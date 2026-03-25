@@ -310,8 +310,8 @@ pub mod validation {
         Ok(())
     }
 
-    /// Validates a container option against a strict allowlist.
-    /// Rejects dangerous flags like --privileged, --pid=host, --cap-add, etc.
+    /// Validates a container option against a blocklist of dangerous flags.
+    /// Rejects options starting with patterns like --privileged, --pid=host, --cap-add, etc.
     pub fn validate_container_option(option: &str) -> Result<()> {
         if option.is_empty() {
             return Ok(());
