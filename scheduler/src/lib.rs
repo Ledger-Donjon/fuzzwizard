@@ -1522,16 +1522,16 @@ impl<C: TargetsCollector> Scheduler<C> {
                             )));
                         }
                         let candidate = self.crashes_directory.join(fuzzer_name).join(filename);
-                        // Canonicalize and verify the resolved path stays within crashes_directory
-                        let canonical_crash_dir = self
+                        // Canonicalize and verify the resolved path stays within this fuzzer's crash directory
+                        let canonical_fuzzer_dir = self
                             .crashes_directory
+                            .join(fuzzer_name)
                             .canonicalize()
                             .map_err(SchedulerError::Io)?;
-                        let canonical_candidate =
-                            candidate.canonicalize().map_err(SchedulerError::Io)?;
-                        if !canonical_candidate.starts_with(&canonical_crash_dir) {
+                        let canonical_candidate = candidate.canonicalize().map_err(SchedulerError::Io)?;
+                        if !canonical_candidate.starts_with(&canonical_fuzzer_dir) {
                             return Err(SchedulerError::PathTraversal(format!(
-                                "Crash path escapes crash directory: {}",
+                                "Crash path escapes fuzzer crash directory: {}",
                                 canonical_candidate.display()
                             )));
                         }
