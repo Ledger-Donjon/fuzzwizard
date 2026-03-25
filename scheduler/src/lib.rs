@@ -370,7 +370,9 @@ pub mod validation {
     /// Rejects arbitrary shell commands to prevent code injection.
     pub fn validate_build_script(script: &str) -> Result<()> {
         if script.trim().is_empty() {
-            return Ok(());
+            return Err(SchedulerError::InvalidInput(
+                "Build script must not be empty or whitespace-only".to_string(),
+            ));
         }
 
         if script.contains('\0') {
