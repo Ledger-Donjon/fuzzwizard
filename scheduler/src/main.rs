@@ -28,55 +28,16 @@ fn build_targets(
             }
         }
     }
-    // Validate build script for security
     let build_script = &config_json.build_script;
 
-    // Check script is not empty
-    if build_script.trim().is_empty() {
-        error!("Build script is empty, refusing to execute");
+    if let Err(e) = scheduler::validation::validate_build_script(build_script) {
+        error!("Build script rejected: {e}");
         return last_build_at;
     }
 
-    // Check for null bytes
-    if build_script.contains('\0') {
-        error!("Build script contains null bytes, refusing to execute");
-        return last_build_at;
-    }
-
-    // Check script length (max 64KB)
-    if build_script.len() > 65536 {
-        error!(
-            "Build script too long ({} bytes), refusing to execute",
-            build_script.len()
-        );
-        return last_build_at;
-    }
-
-    // Check for dangerous shell patterns that could indicate command injection
-    // Note: This is defense in depth - the config file should be trusted, but we validate anyway
-    const DANGEROUS_PATTERNS: &[&str] = &[
-        // Command chaining that could be abused
-        "&&", "||", ";", // Command substitution
-        "`", "$(", // Redirection that could overwrite files
-        ">>", "<<",
-    ];
-
-    // Only warn for dangerous patterns since build scripts may legitimately use some of these
-    for pattern in DANGEROUS_PATTERNS {
-        if build_script.contains(pattern) {
-            info!(
-                "Warning: Build script contains potentially dangerous pattern '{pattern}'. \
-                 Ensure the script is from a trusted source."
-            );
-        }
-    }
-
-    // Log the script being executed for audit purposes
     info!("Executing build script: {build_script}");
 
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(build_script)
+    let status = Command::new(build_script.trim())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();

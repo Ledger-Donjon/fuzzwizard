@@ -74,6 +74,10 @@ container_image=fuzzing-image:latest
 # Generate coverage? (y/n)
 has_coverage=n
 
+# Directory with llvm-cov and llvm-profdata (optional; for scheduler coverage analysis).
+# Example (Homebrew LLVM): /opt/homebrew/opt/llvm/bin
+# llvm_bin_directory=
+
 # Add this scheduler to the main config.json for FuzzTUI? (y/n)
 add_to_main_config=n
 
@@ -140,6 +144,7 @@ parse_config() {
             use_docker) USE_DOCKER="$val" ;;
             container_image) CONTAINER_IMAGE="$val" ;;
             has_coverage) HAS_COVERAGE="$val" ;;
+            llvm_bin_directory) LLVM_BIN_DIRECTORY="$val" ;;
             add_to_main_config) ADD_TO_MAIN_CONFIG="$val" ;;
             build_script_interval_hours) BUILD_SCRIPT_INTERVAL_HOURS="$val" ;;
             main_config_path) MAIN_CONFIG_PATH="$val" ;;
@@ -157,6 +162,7 @@ parse_config() {
 PROJECT_NAME=""
 SCHEDULER_BASE_DIR=""
 USE_DOCKER="n"
+LLVM_BIN_DIRECTORY=""
 CONTAINER_IMAGE="fuzzing-image:latest"
 HAS_COVERAGE="n"
 ADD_TO_MAIN_CONFIG="n"
@@ -220,6 +226,12 @@ else
     HAS_COVERAGE_JSON="false"
 fi
 
+if [ -n "${LLVM_BIN_DIRECTORY:-}" ]; then
+    LLVM_BIN_DIRECTORY_JSON=$(printf '"%s"' "${LLVM_BIN_DIRECTORY//\"/\\\"}")
+else
+    LLVM_BIN_DIRECTORY_JSON="null"
+fi
+
 echo ""
 echo "Creating scheduler for project: $SAFE_NAME"
 echo "  Scheduler directory: $SCHEDULER_DIR"
@@ -248,6 +260,7 @@ cat > "$CONFIG_JSON" << EOF
   "crashes_directory": "${CRASHES_DIR}",
   "coverage_directory": "${COVERAGE_DIR}",
   "has_coverage": ${HAS_COVERAGE_JSON},
+  "llvm_bin_directory": ${LLVM_BIN_DIRECTORY_JSON},
   "container_image": ${CONTAINER_IMAGE_JSON},
   "container_options": ${CONTAINER_OPTIONS_JSON},
   "state_file": "${SCHEDULER_DIR}/state.json"${BUILD_SCRIPT_INTERVAL_JSON}

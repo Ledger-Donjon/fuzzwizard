@@ -24,25 +24,28 @@ type DbPool = Pool<ConnectionManager<PgConnection>>;
 
 #[tokio::main]
 async fn main() {
-    // Parse command line arguments
-    let args: Vec<String> = env::args().collect();
-    let mut db_url = String::new();
-
-    for i in 0..args.len() {
-        if args[i] == "--database-url" || args[i] == "--db-url" {
-            if i + 1 < args.len() {
-                db_url = args[i + 1].clone();
-            } else {
-                eprintln!("Error: {} requires a value", args[i]);
-                std::process::exit(1);
+    // Read database URL from environment variable (preferred) or CLI argument
+    let db_url = if let Ok(url) = env::var("DATABASE_URL") {
+        url
+    } else {
+        let args: Vec<String> = env::args().collect();
+        let mut url = String::new();
+        for i in 0..args.len() {
+            if args[i] == "--database-url" || args[i] == "--db-url" {
+                if i + 1 < args.len() {
+                    url = args[i + 1].clone();
+                } else {
+                    eprintln!("Error: {} requires a value", args[i]);
+                    std::process::exit(1);
+                }
             }
         }
-    }
-
-    if db_url.is_empty() {
-        eprintln!("Error: --database-url (or --db-url) argument is required");
-        std::process::exit(1);
-    }
+        if url.is_empty() {
+            eprintln!("Error: DATABASE_URL env var or --database-url argument is required");
+            std::process::exit(1);
+        }
+        url
+    };
 
     // Configure ftail to write to a file
     let log_file_path = "./logs/backend.log";

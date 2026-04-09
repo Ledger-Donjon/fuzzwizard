@@ -37,6 +37,7 @@ fn test_get_tasks_with_status_empty() {
         container_image: None,
         container_options: None,
         has_coverage: false,
+        llvm_bin_directory: None,
         state_file: None,
     };
 
@@ -75,6 +76,7 @@ fn test_get_tasks_with_status_after_update() {
         container_image: None,
         container_options: None,
         has_coverage: false,
+        llvm_bin_directory: None,
         state_file: None,
     };
 
@@ -114,6 +116,7 @@ fn test_log_running_tasks_empty() {
         container_image: None,
         container_options: None,
         has_coverage: false,
+        llvm_bin_directory: None,
         state_file: None,
     };
 
@@ -152,6 +155,7 @@ fn test_task_status_info_fields() {
         container_image: None,
         container_options: None,
         has_coverage: false,
+        llvm_bin_directory: None,
         state_file: None,
     };
 

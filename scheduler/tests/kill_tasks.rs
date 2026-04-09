@@ -37,6 +37,7 @@ fn test_kill_tasks_empty() {
         container_image: None,
         container_options: None,
         has_coverage: false,
+        llvm_bin_directory: None,
         state_file: None,
     };
 
@@ -75,6 +76,7 @@ fn test_kill_tasks_with_running_tasks() {
         container_image: None,
         container_options: None,
         has_coverage: false,
+        llvm_bin_directory: None,
         state_file: None,
     };
 
@@ -122,6 +124,7 @@ fn test_kill_tasks_with_container() {
         container_image: Some("test-image".to_string()),
         container_options: None,
         has_coverage: false,
+        llvm_bin_directory: None,
         state_file: None,
     };
 

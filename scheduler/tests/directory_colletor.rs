@@ -58,6 +58,7 @@ fn directory_collector() {
         container_options: None,
         backend_url: "http://127.0.0.1:0".to_string(),
         has_coverage: false,
+        llvm_bin_directory: None,
         state_file: None,
     };
 
