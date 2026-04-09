@@ -639,6 +639,8 @@ pub struct Task {
     stderr: ChildStderr,
     started_at: Instant,
     container_name: Option<String>,
+    /// Expected `.profraw` path (set after spawn using the child PID).
+    profraw_path: Option<PathBuf>,
     /// Status of the task (running, crashed, or stopped)
     pub status: TaskStatus,
     /// Timestamp when the task crashed (if applicable)
@@ -1305,8 +1307,6 @@ impl<C: TargetsCollector> Scheduler<C> {
         fs::set_permissions(&fuzzer_coveragedir, perms)?;
         let mut child: Child;
         let mut task_container_name: Option<String> = None;
-        let mut random_cov: [u8; 4] = [0u8; 4];
-        rng.fill(&mut random_cov);
 
         if let Some(ref container_image) = self.container_image {
             if let Some(ref binary) = self.container_binary {
@@ -1333,11 +1333,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                     "/tmp:rw,noexec,nosuid,size=256m".into(),
                     // Set up environment variable for coverage outputs in the container
                     "-e".into(),
-                    format!(
-                        "LLVM_PROFILE_FILE=/fuzzer/coverage/%p_{}_{}.profraw",
-                        hex::encode(random_cov),
-                        hex::encode(fuzzer_hash)
-                    ),
+                    "LLVM_PROFILE_FILE=/fuzzer/coverage/%p.profraw".into(),
                     "-v".into(),
                     format!("{}:/fuzzer/binary:ro", fuzzer_path.display()),
                     "-v".into(),
@@ -1348,8 +1344,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                     format!("{}:/fuzzer/coverage/", fuzzer_coveragedir.display()),
                 ];
 
-                // Then image and command
-                args.push(container_image.clone());
+                // Docker requires flags like --platform before IMAGE; keep container_options here.
                 if let Some(ref opts) = self.container_options {
                     for opt in opts {
                         if !opt.is_empty() {
@@ -1358,6 +1353,8 @@ impl<C: TargetsCollector> Scheduler<C> {
                         }
                     }
                 }
+
+                args.push(container_image.clone());
 
                 args.push("/fuzzer/binary".into());
                 args.push("/fuzzer/corpus_dir/".into());
@@ -1403,10 +1400,9 @@ impl<C: TargetsCollector> Scheduler<C> {
             // Add coverage file output option if coverage is enabled
             if self.has_coverage {
                 args.push(format!(
-                    "-LLVM_PROFILE_FILE={}/%p_{}_{}.profraw",
+                    "-LLVM_PROFILE_FILE={}/{}",
                     fuzzer_coveragedir.display(),
-                    hex::encode(random_cov),
-                    hex::encode(fuzzer_hash)
+                    "%p.profraw",
                 ));
             }
 
@@ -1429,12 +1425,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             if self.has_coverage {
                 cmd.env(
                     "LLVM_PROFILE_FILE",
-                    format!(
-                        "{}/%p_{}_{}.profraw",
-                        fuzzer_coveragedir.display(),
-                        hex::encode(random_cov),
-                        hex::encode(fuzzer_hash)
-                    ),
+                    format!("{}/{}", fuzzer_coveragedir.display(), "%p.profraw",),
                 );
             }
 
@@ -1468,13 +1459,25 @@ impl<C: TargetsCollector> Scheduler<C> {
                 e
             );
         }
+        let profraw_path = if self.has_coverage {
+            let pid = if task_container_name.is_some() {
+                1
+            } else {
+                child.id()
+            };
+            Some(fuzzer_coveragedir.join(format!("{pid}.profraw")))
+        } else {
+            None
+        };
+
         Ok(Task {
             child,
             stderr: child_stderr,
             path: fuzzer_path,
             started_at: Instant::now(),
-            status: TaskStatus::Running,
             container_name: task_container_name,
+            profraw_path,
+            status: TaskStatus::Running,
             crashed_at: None,
             stopped_at: None,
         })
@@ -1878,26 +1881,21 @@ impl<C: TargetsCollector> Scheduler<C> {
         // Build coverage directory path
         let coverage_dir = self.coverage_directory.join(fuzzer_name);
 
-        // Analyze coverage
         coverage::analyze_coverage(
             &coverage_dir,
             &task.path,
             sha,
+            task.profraw_path.as_deref(),
             self.llvm_bin_directory.as_deref(),
         )
     }
 
-    /// Get coverage for a specific file in a task
+    /// Get coverage for a specific file (or all files) in a task.
     ///
-    /// # Arguments
-    ///
-    /// * `sha` - SHA hash of the fuzzer binary
-    /// * `file_path` - Path to the source file
-    ///
-    /// # Returns
-    ///
-    /// A string containing the coverage information for the file
-    pub fn get_task_file_coverage(&self, sha: &Sha, file_path: &Path) -> String {
+    /// When `file_path` is `Some`, returns annotated source for that file.
+    /// When `file_path` is `None`, returns annotated source for all files (TOTAL).
+    pub fn get_task_file_coverage(&self, sha: &Sha, file_path: Option<&Path>) -> String {
+        info!("Start file coverage for: {file_path:?}");
         if !self.has_coverage {
             return "Coverage is not enabled for this scheduler".to_string();
         }
@@ -1918,6 +1916,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             &coverage_dir,
             &task.path,
             sha,
+            task.profraw_path.as_deref(),
             file_path,
             self.llvm_bin_directory.as_deref(),
         )

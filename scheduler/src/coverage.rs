@@ -1,13 +1,15 @@
 // SPDX-FileCopyrightText: © 2026 LEDGER SAS
 // SPDX-License-Identifier: MIT
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use log::{debug, info, warn};
 
 use crate::Sha;
 
 /// Resolve LLVM tool binary: config directory first, then `FUZZWIZARD_LLVM_BIN`, then `PATH`.
-/// Avoids hard-coded `/usr/bin/...` so coverage works across distros and architectures (e.g. Homebrew LLVM).
 fn llvm_tool(name: &str, config_bin_dir: Option<&Path>) -> String {
     const ENV: &str = "FUZZWIZARD_LLVM_BIN";
     if let Some(dir) = config_bin_dir {
@@ -25,271 +27,407 @@ fn llvm_tool(name: &str, config_bin_dir: Option<&Path>) -> String {
     name.to_string()
 }
 
-/// Guard that removes the temp directory on drop.
-struct TempDirGuard(PathBuf);
-
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Creates a unique temp dir, merges profraw files into `merged.profdata`, and returns the path
-/// plus a guard for cleanup.
-fn merge_profraw_to_temp(
-    profraw_files: &[PathBuf],
+/// Convert `.profraw` → indexed `.profdata` via `llvm-profdata merge`.
+fn merge_profdata(
+    profraw: &Path,
+    coverage_dir: &Path,
     llvm_bin_dir: Option<&Path>,
-) -> Result<(PathBuf, TempDirGuard), String> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "fuzzwizard_coverage_{}_{:016x}",
-        std::process::id(),
-        rand::random::<u64>()
-    ));
-    std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {e}"))?;
-
-    let merged_profdata = temp_dir.join("merged.profdata");
-    let profraw_paths: Vec<String> = profraw_files
-        .iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect();
-
-    let output = Command::new(llvm_tool("llvm-profdata", llvm_bin_dir))
-        .args(["merge", "-sparse"])
-        .args(&profraw_paths)
-        .arg("-o")
-        .arg(&merged_profdata)
+) -> Result<PathBuf, String> {
+    let profdata = coverage_dir.join("coverage.profdata");
+    let exe = llvm_tool("llvm-profdata", llvm_bin_dir);
+    let args = vec![
+        "merge".into(),
+        "-sparse".into(),
+        profraw.to_string_lossy().into_owned(),
+        "-o".into(),
+        profdata.to_string_lossy().into_owned(),
+    ];
+    let output = Command::new(&exe)
+        .args(&args)
         .output()
-        .map_err(|e| {
-            format!(
-                "llvm-profdata not available or error: {e}\n\nNote: Install LLVM tools (llvm-profdata, llvm-cov) to analyze coverage."
-            )
-        })?;
+        .map_err(|e| format!("llvm-profdata not available: {e}"))?;
 
     if !output.status.success() {
         return Err(format!(
-            "Failed to merge profraw files:\n{}\n\nNote: Install LLVM tools (llvm-profdata) to analyze coverage.",
+            "llvm-profdata merge failed:\n{}",
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-
-    Ok((merged_profdata, TempDirGuard(temp_dir)))
+    Ok(profdata)
 }
 
-/// Resolve coverage dir: collect profraw paths and binary for the given sha.
-fn collect_profraw_and_binary(
+/// Resolve `.profdata` and the instrumented binary for a fuzzer.
+fn resolve_profdata_and_binary(
     coverage_dir: &Path,
     binary_path: &Path,
     sha: &Sha,
-) -> Result<(Vec<PathBuf>, PathBuf), String> {
-    if !coverage_dir.exists() {
-        return Err(format!(
-            "Coverage directory not found: {}",
-            coverage_dir.display()
-        ));
+    profraw_path: Option<&Path>,
+    llvm_bin_dir: Option<&Path>,
+) -> Result<(PathBuf, PathBuf), String> {
+    let profraw = profraw_path.ok_or_else(|| "No profraw path set for this task".to_string())?;
+    if !profraw.exists() {
+        return Err(format!("Profraw file not found: {}", profraw.display()));
     }
+    let profdata = merge_profdata(profraw, coverage_dir, llvm_bin_dir)?;
 
-    let mut profraw_files = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(coverage_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("profraw") {
-                profraw_files.push(path);
-            }
-        }
-    }
-
-    if profraw_files.is_empty() {
-        return Err(format!(
-            "No profraw files found in: {}",
-            coverage_dir.display()
-        ));
-    }
-
-    let binary_name = format!("fuzzer_{}.bin", hex::encode(sha));
-    let coverage_binary = coverage_dir.join(&binary_name);
-    let binary_to_use = if coverage_binary.exists() {
+    let coverage_binary = coverage_dir.join(format!("fuzzer_{}.bin", hex::encode(sha)));
+    let binary = if coverage_binary.exists() {
         coverage_binary
     } else if binary_path.exists() {
         binary_path.to_path_buf()
     } else {
-        return Err(format!(
-            "Binary not found for coverage analysis. Expected: {}",
-            coverage_binary.display()
-        ));
+        return Err(format!("Binary not found: {}", coverage_binary.display()));
     };
 
-    Ok((profraw_files, binary_to_use))
+    Ok((profdata, binary))
 }
 
-/// Run llvm-cov report and return the report text.
-fn run_coverage_report(
-    profraw_files: &[PathBuf],
-    binary_path: &Path,
-    llvm_bin_dir: Option<&Path>,
-) -> String {
-    let (_guard, merged_profdata) = match merge_profraw_to_temp(profraw_files, llvm_bin_dir) {
-        Ok((path, guard)) => (guard, path),
-        Err(e) => return e,
-    };
+/// Extract `"filename":"…"` values from `llvm-cov export --summary-only` JSON output.
+fn parse_filenames_from_export(json: &str) -> Vec<String> {
+    let mut result = HashSet::new();
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(json) {
+        collect_filenames(&v, &mut result);
+    }
+    result.into_iter().collect()
+}
 
-    let output = match Command::new(llvm_tool("llvm-cov", llvm_bin_dir))
-        .args(["report"])
-        .arg(binary_path)
-        .arg("-instr-profile")
-        .arg(&merged_profdata)
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            return format!(
-                "llvm-cov not available or error: {e}\n\nNote: Install LLVM tools to see coverage."
-            );
+fn collect_filenames(v: &serde_json::Value, out: &mut HashSet<String>) {
+    match v {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(s)) = map.get("filename") {
+                if !s.is_empty() {
+                    out.insert(s.clone());
+                }
+            }
+            for val in map.values() {
+                collect_filenames(val, out);
+            }
         }
-    };
-
-    if output.status.success() {
-        String::from_utf8_lossy(&output.stdout).to_string()
-    } else {
-        format!(
-            "Failed to generate coverage report:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        )
+        serde_json::Value::Array(arr) => {
+            for val in arr {
+                collect_filenames(val, out);
+            }
+        }
+        _ => {}
     }
 }
 
-/// Analyze coverage for a fuzzer. Returns the full summary report (header + llvm-cov report).
-/// The report text includes the list of files; the UI can parse it to show the file list.
+/// Extract source file paths embedded in the binary via `llvm-cov export --summary-only`.
+fn embedded_source_paths(
+    profdata: &Path,
+    binary: &Path,
+    llvm_bin_dir: Option<&Path>,
+) -> Vec<String> {
+    let exe = llvm_tool("llvm-cov", llvm_bin_dir);
+    let args = vec![
+        "export".into(),
+        "--summary-only".into(),
+        "-instr-profile".into(),
+        profdata.to_string_lossy().into_owned(),
+        binary.to_string_lossy().into_owned(),
+    ];
+    let output = match Command::new(&exe).args(&args).output() {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            debug!(
+                "llvm-cov export failed: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            return Vec::new();
+        }
+        Err(e) => {
+            debug!("llvm-cov export not available: {e}");
+            return Vec::new();
+        }
+    };
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let result = parse_filenames_from_export(&raw);
+    debug!(
+        "llvm-cov export found {} filenames: {:?}",
+        result.len(),
+        result
+    );
+    result
+}
+
+/// Detect container/host path mismatch and return a `-path-equivalence=FROM,TO` flag if needed.
+///
+/// Walks up from `host_binary_path` looking for an embedded source file on disk to derive
+/// the mapping between container and host paths.
+fn detect_path_equivalence(embedded_paths: &[String], host_binary_path: &Path) -> Option<String> {
+    if embedded_paths.is_empty() {
+        return None;
+    }
+
+    let start_dir = if host_binary_path.is_dir() {
+        host_binary_path.to_path_buf()
+    } else {
+        host_binary_path.parent()?.to_path_buf()
+    };
+
+    for emb in embedded_paths {
+        let emb_path = Path::new(emb);
+        let emb_name = match emb_path.file_name().and_then(|s| s.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        let emb_dir = emb_path.parent().unwrap_or(Path::new("/"));
+
+        let mut candidate = Some(start_dir.as_path());
+        while let Some(dir) = candidate {
+            if dir == emb_dir {
+                return None;
+            }
+            if dir.join(emb_name).is_file() {
+                let host_str = dir.to_string_lossy();
+                let emb_str = emb_dir.to_string_lossy();
+                let result = format!("-path-equivalence={emb_str},{host_str}");
+                info!("Path equivalence detected: {result}");
+                return Some(result);
+            }
+            candidate = dir.parent();
+        }
+    }
+
+    None
+}
+
+/// Run `llvm-cov report` and return the text output.
+fn run_report(
+    profdata: &Path,
+    binary: &Path,
+    llvm_bin_dir: Option<&Path>,
+    path_equiv: Option<&str>,
+) -> String {
+    let exe = llvm_tool("llvm-cov", llvm_bin_dir);
+    let mut args: Vec<String> = vec![
+        "report".into(),
+        binary.to_string_lossy().into_owned(),
+        "-instr-profile".into(),
+        profdata.to_string_lossy().into_owned(),
+        "-use-color=false".into(),
+    ];
+    if let Some(pe) = path_equiv {
+        args.push(pe.to_string());
+    }
+    match Command::new(&exe).args(&args).output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        Ok(o) => format!(
+            "llvm-cov report failed:\n{}",
+            String::from_utf8_lossy(&o.stderr)
+        ),
+        Err(e) => format!("llvm-cov not available: {e}"),
+    }
+}
+
+/// Run `llvm-cov show` and return annotated source.
+///
+/// When `source_file` is `None`, the full output (all files) is returned.
+/// When `source_file` is `Some`, only the section matching that file is extracted.
+///
+/// Because `-path-equivalence` interacts unpredictably with the source-file
+/// filter argument across LLVM versions (see llvm/llvm-project#62689), we run
+/// `llvm-cov show` **without** a source filter and extract the section that
+/// matches the requested file from the full output.
+fn run_show(
+    profdata: &Path,
+    binary: &Path,
+    source_file: Option<&Path>,
+    llvm_bin_dir: Option<&Path>,
+    path_equiv: Option<&str>,
+) -> Result<String, String> {
+    let exe = llvm_tool("llvm-cov", llvm_bin_dir);
+
+    let mut args: Vec<String> = vec![
+        "show".into(),
+        "-instr-profile".into(),
+        profdata.to_string_lossy().into_owned(),
+        binary.to_string_lossy().into_owned(),
+        "-format=text".into(),
+        "-show-line-counts-or-regions".into(),
+        "-use-color=false".into(),
+    ];
+    if let Some(pe) = path_equiv {
+        args.push(pe.to_string());
+    }
+
+    debug!("llvm-cov show command: {} {}", exe, args.join(" "));
+
+    let output = Command::new(&exe)
+        .args(&args)
+        .output()
+        .map_err(|e| format!("llvm-cov not available: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("llvm-cov show failed:\n{stderr}"));
+    }
+
+    let full_output = String::from_utf8_lossy(&output.stdout).to_string();
+    if full_output.trim().is_empty() {
+        return Ok(String::new());
+    }
+
+    let source_file = match source_file {
+        Some(sf) => sf,
+        None => return Ok(full_output),
+    };
+
+    let file_name = source_file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    let source_str = source_file.to_string_lossy();
+
+    debug!(
+        "run_show: extracting section for {:?} (basename {:?}) from {} bytes",
+        source_str,
+        file_name,
+        full_output.len()
+    );
+
+    extract_file_section(&full_output, &source_str, file_name)
+        .map(Ok)
+        .unwrap_or(Ok(String::new()))
+}
+
+/// Extract the annotated-source section for a single file from `llvm-cov show` text output.
+///
+/// `llvm-cov show -format=text` separates files with a header line of the form:
+///
+/// ```text
+/// /path/to/source.c:
+///     1|   10|int main() {
+/// ```
+///
+/// We match on the full path first, then fall back to matching the basename.
+fn extract_file_section(full_output: &str, source_path: &str, basename: &str) -> Option<String> {
+    let lines: Vec<&str> = full_output.lines().collect();
+
+    // A file header is a line that ends with ':' and whose content (minus the colon)
+    // looks like a file path (contains '/' or '\').
+    let is_file_header = |line: &str| -> bool {
+        let t = line.trim();
+        t.ends_with(':') && {
+            let path_part = &t[..t.len() - 1];
+            (path_part.contains('/') || path_part.contains('\\')) && !path_part.contains('|')
+        }
+    };
+
+    // Find all file sections: (header_line_index, path_in_header)
+    let sections: Vec<(usize, &str)> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| is_file_header(l))
+        .map(|(i, l)| {
+            let t = l.trim();
+            (i, &t[..t.len() - 1])
+        })
+        .collect();
+
+    if sections.is_empty() {
+        // No file headers found — output is probably for a single file already.
+        return Some(full_output.to_string());
+    }
+
+    debug!("extract_file_section: {} sections found", sections.len());
+
+    // Try exact path match first, then basename match.
+    let target = sections
+        .iter()
+        .find(|(_, p)| *p == source_path)
+        .or_else(|| {
+            sections
+                .iter()
+                .find(|(_, p)| Path::new(p).file_name().and_then(|n| n.to_str()) == Some(basename))
+        });
+
+    let &(start_idx, matched_path) = target?;
+    debug!("extract_file_section: matched {matched_path:?}");
+
+    // Find the end of this section (next file header or end of output).
+    let end_idx = sections
+        .iter()
+        .find(|(i, _)| *i > start_idx)
+        .map(|(i, _)| *i)
+        .unwrap_or(lines.len());
+
+    let section: String = lines[start_idx..end_idx].to_vec().join("\n");
+
+    Some(section)
+}
+
+/// Coverage summary report for a fuzzer (used by the TUI file list view).
 pub fn analyze_coverage(
     coverage_dir: &Path,
     binary_path: &Path,
     sha: &Sha,
-    llvm_bin_directory: Option<&Path>,
-) -> String {
-    let (profraw_files, binary_to_use) =
-        match collect_profraw_and_binary(coverage_dir, binary_path, sha) {
-            Ok(x) => x,
-            Err(e) => return e,
-        };
-
-    let report = run_coverage_report(&profraw_files, &binary_to_use, llvm_bin_directory);
-    let mut result = format!("Coverage Analysis for: {}\n", binary_path.display());
-    result.push_str(&format!("Coverage Directory: {}\n", coverage_dir.display()));
-    result.push_str(&format!("Profraw Files Found: {}\n", profraw_files.len()));
-    result.push_str(&format!("Binary: {}\n\n", binary_to_use.display()));
-    result.push_str(&report);
-    log::info!("Coverage summary: {result}");
-    result
-}
-
-/// Coverage for a single file with line-by-line information.
-/// Use this when you already have profraw list and binary path.
-fn get_file_coverage_inner(
-    profraw_files: &[PathBuf],
-    binary_path: &Path,
-    file_path: &Path,
+    profraw_path: Option<&Path>,
     llvm_bin_dir: Option<&Path>,
 ) -> String {
-    let (_guard, merged_profdata) = match merge_profraw_to_temp(profraw_files, llvm_bin_dir) {
-        Ok((path, guard)) => (guard, path),
+    let (profdata, binary) = match resolve_profdata_and_binary(
+        coverage_dir,
+        binary_path,
+        sha,
+        profraw_path,
+        llvm_bin_dir,
+    ) {
+        Ok(x) => x,
         Err(e) => return e,
     };
 
-    // Run llvm-cov show without file filter (no -include-filename-regex: not supported on all LLVM versions),
-    // then extract only the section for the requested file from the text output.
-    let output = match Command::new(llvm_tool("llvm-cov", llvm_bin_dir))
-        .args(["show", "-instr-profile"])
-        .arg(&merged_profdata)
-        .arg(binary_path)
-        .args(["-format=text", "-show-line-counts-or-regions"])
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            return format!(
-                "llvm-cov not available or error: {e}\n\nNote: Install LLVM tools to see detailed coverage information."
-            );
-        }
-    };
+    let embedded = embedded_source_paths(&profdata, &binary, llvm_bin_dir);
+    let path_equiv = detect_path_equivalence(&embedded, binary_path);
+    let report = run_report(&profdata, &binary, llvm_bin_dir, path_equiv.as_deref());
 
-    if !output.status.success() {
-        return format!(
-            "Failed to generate file coverage:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let full_output = String::from_utf8_lossy(&output.stdout).to_string();
-    extract_file_section(&full_output, file_path).unwrap_or(full_output)
+    let mut result = format!("Coverage Analysis for: {}\n", binary_path.display());
+    result.push_str(&format!("Coverage Directory: {}\n", coverage_dir.display()));
+    result.push_str(&format!("Profile: {}\n", profdata.display()));
+    result.push_str(&format!("Binary: {}\n\n", binary.display()));
+    result.push_str(&report);
+    result
 }
 
-/// Extract from `llvm-cov show` text output the section for the given file.
+/// Line-by-line coverage for source file(s).
 ///
-/// In text mode each file section starts with a header line `"path:"` at column 0
-/// (no leading whitespace, no `|`).  All coverage data lines contain `|`
-/// (format: `COUNT|LINENUM|code`), so that is the discriminant.
-fn extract_file_section(full_output: &str, file_path: &Path) -> Option<String> {
-    let wanted = file_path.to_string_lossy();
-    let wanted_name = file_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-
-    let mut current_path: Option<&str> = None;
-    let mut current_lines: Vec<&str> = Vec::new();
-
-    for line in full_output.lines() {
-        let is_header = line.ends_with(':') && !line.starts_with(' ') && !line.contains('|');
-
-        if is_header {
-            if let Some(prev) = current_path {
-                if paths_match(prev, &wanted, wanted_name) {
-                    return Some(current_lines.join("\n"));
-                }
-            }
-            current_path = Some(line.trim_end_matches(':'));
-            current_lines.clear();
-            current_lines.push(line);
-        } else if current_path.is_some() {
-            current_lines.push(line);
-        }
-    }
-
-    if let Some(prev) = current_path {
-        if paths_match(prev, &wanted, wanted_name) {
-            return Some(current_lines.join("\n"));
-        }
-    }
-    None
-}
-
-/// Flexible path comparison: exact match, suffix/prefix (absolute vs relative),
-/// or same file name.
-fn paths_match(section_path: &str, wanted: &str, wanted_name: &str) -> bool {
-    let section = section_path.trim();
-    section == wanted
-        || section.ends_with(wanted)
-        || wanted.ends_with(section)
-        || (!wanted_name.is_empty()
-            && (section.ends_with(&format!("/{wanted_name}"))
-                || section.ends_with(&format!("\\{wanted_name}"))
-                || section == wanted_name))
-}
-
-/// Coverage for a single file (line-by-line). Resolves coverage dir and binary from sha.
-/// Call this from the scheduler when you have coverage_dir and task path.
+/// When `file_path` is `Some`, returns annotated source for that single file.
+/// When `file_path` is `None`, returns annotated source for **all** files (TOTAL view).
 pub fn get_file_coverage(
     coverage_dir: &Path,
     binary_path: &Path,
     sha: &Sha,
-    file_path: &Path,
-    llvm_bin_directory: Option<&Path>,
+    profraw_path: Option<&Path>,
+    file_path: Option<&Path>,
+    llvm_bin_dir: Option<&Path>,
 ) -> String {
-    let (profraw_files, binary_to_use) =
-        match collect_profraw_and_binary(coverage_dir, binary_path, sha) {
-            Ok(x) => x,
-            Err(e) => return e,
-        };
-    get_file_coverage_inner(
-        &profraw_files,
-        &binary_to_use,
+    let (profdata, binary) = match resolve_profdata_and_binary(
+        coverage_dir,
+        binary_path,
+        sha,
+        profraw_path,
+        llvm_bin_dir,
+    ) {
+        Ok(x) => x,
+        Err(e) => return e,
+    };
+
+    let embedded = embedded_source_paths(&profdata, &binary, llvm_bin_dir);
+    let path_equiv = detect_path_equivalence(&embedded, binary_path);
+
+    match run_show(
+        &profdata,
+        &binary,
         file_path,
-        llvm_bin_directory,
-    )
+        llvm_bin_dir,
+        path_equiv.as_deref(),
+    ) {
+        Ok(s) if !s.trim().is_empty() => s,
+        Ok(_) => {
+            warn!(
+                "llvm-cov show produced no output for {file_path:?} (binary={binary:?}, path_equiv={path_equiv:?})"
+            );
+            "llvm-cov show produced no output for this file.".to_string()
+        }
+        Err(e) => e,
+    }
 }

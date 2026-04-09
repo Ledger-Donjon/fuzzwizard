@@ -822,39 +822,43 @@ impl App {
     }
 
     fn display_coverage(&mut self, scheduler_index: usize, task: &TaskInfo) {
-        // Try to get coverage data from scheduler
-        if let Ok(launcher) = self.launcher.try_read() {
-            if scheduler_index >= launcher.scheduler_processes.len() {
-                self.coverage.data = Some("Error: Scheduler not found".to_string());
+        // Use blocking read: background thread may hold write lock during
+        // `update_status()` (often longer in containers). try_read() fails spuriously then.
+        match self.launcher.read() {
+            Ok(launcher) => {
+                if scheduler_index >= launcher.scheduler_processes.len() {
+                    self.coverage.data = Some("Error: Scheduler not found".to_string());
+                    self.coverage.view_open = true;
+                    self.coverage.scroll_offset = 0;
+                    self.coverage.mode = CoverageMode::FileList;
+                    return;
+                }
+
+                let scheduler = &launcher.scheduler_processes[scheduler_index].scheduler;
+                let coverage_info = scheduler.get_task_coverage(&task.sha);
+                self.coverage.data = Some(coverage_info.clone());
+                let (rows, paths, file_col) = Self::parse_coverage_summary(&coverage_info);
+                self.coverage.summary_index = if rows.len() > 1 { 1 } else { 0 };
+                self.coverage.summary_rows = rows;
+                self.coverage.file_paths = paths;
+                self.coverage.file_col = file_col;
+                self.coverage.file_data = None;
+
                 self.coverage.view_open = true;
                 self.coverage.scroll_offset = 0;
                 self.coverage.mode = CoverageMode::FileList;
-                return;
             }
-
-            let scheduler = &launcher.scheduler_processes[scheduler_index].scheduler;
-            let coverage_info = scheduler.get_task_coverage(&task.sha);
-            self.coverage.data = Some(coverage_info.clone());
-            let (rows, paths, file_col) = Self::parse_coverage_summary(&coverage_info);
-            self.coverage.summary_index = if rows.len() > 1 { 1 } else { 0 };
-            self.coverage.summary_rows = rows;
-            self.coverage.file_paths = paths;
-            self.coverage.file_col = file_col;
-            self.coverage.file_data = None;
-
-            self.coverage.view_open = true;
-            self.coverage.scroll_offset = 0;
-            // Start directly in FileList mode
-            self.coverage.mode = CoverageMode::FileList;
-        } else {
-            self.coverage.data = Some("Error: Could not access scheduler".to_string());
-            self.coverage.view_open = true;
-            self.coverage.scroll_offset = 0;
-            self.coverage.mode = CoverageMode::FileList;
-            self.coverage.summary_rows = Vec::new();
-            self.coverage.file_paths = Vec::new();
-            self.coverage.file_col = None;
-            self.coverage.summary_index = 0;
+            Err(_) => {
+                self.coverage.data =
+                    Some("Error: Scheduler lock poisoned (internal error)".to_string());
+                self.coverage.view_open = true;
+                self.coverage.scroll_offset = 0;
+                self.coverage.mode = CoverageMode::FileList;
+                self.coverage.summary_rows = Vec::new();
+                self.coverage.file_paths = Vec::new();
+                self.coverage.file_col = None;
+                self.coverage.summary_index = 0;
+            }
         }
     }
 
@@ -931,7 +935,13 @@ impl App {
             let cols: Vec<String> = trimmed.split_whitespace().map(|s| s.to_string()).collect();
 
             if cols.len() >= 3 {
-                let path = file_col.and_then(|i| cols.get(i)).cloned();
+                let path = file_col.and_then(|i| cols.get(i)).and_then(|p| {
+                    if p.to_uppercase().starts_with("TOTAL") {
+                        None
+                    } else {
+                        Some(p.clone())
+                    }
+                });
                 file_paths.push(path);
                 rows.push(cols);
             } else if cols.len() == 1
@@ -1028,7 +1038,12 @@ impl App {
         };
         info!("Loading coverage file: {file_path}");
 
-        let file_path_buf = std::path::PathBuf::from(&file_path);
+        let is_total = file_path.to_uppercase().starts_with("TOTAL");
+        let file_path_opt = if is_total {
+            None
+        } else {
+            Some(std::path::PathBuf::from(&file_path))
+        };
 
         // Get task SHA from cache
         let task_sha = if let Some(tasks) = self.tasks_cache.get(&scheduler_index) {
@@ -1041,14 +1056,25 @@ impl App {
             return;
         };
 
-        // Get file coverage from scheduler
-        if let Ok(launcher) = self.launcher.try_read() {
-            if scheduler_index < launcher.scheduler_processes.len() {
-                let scheduler = &launcher.scheduler_processes[scheduler_index].scheduler;
-                let file_coverage = scheduler.get_task_file_coverage(&task_sha, &file_path_buf);
-                self.coverage.file_data = Some(file_coverage);
+        match self.launcher.read() {
+            Ok(launcher) => {
+                if scheduler_index < launcher.scheduler_processes.len() {
+                    let scheduler = &launcher.scheduler_processes[scheduler_index].scheduler;
+                    let file_coverage =
+                        scheduler.get_task_file_coverage(&task_sha, file_path_opt.as_deref());
+                    self.coverage.file_data = Some(file_coverage);
+                    self.coverage.mode = CoverageMode::FileView;
+                    self.coverage.scroll_offset = 0;
+                } else {
+                    self.coverage.file_data =
+                        Some("Error: scheduler index out of range.".to_string());
+                    self.coverage.mode = CoverageMode::FileView;
+                }
+            }
+            Err(_) => {
+                self.coverage.file_data =
+                    Some("Could not read scheduler (lock poisoned). Restart fuzztui.".to_string());
                 self.coverage.mode = CoverageMode::FileView;
-                self.coverage.scroll_offset = 0;
             }
         }
     }
