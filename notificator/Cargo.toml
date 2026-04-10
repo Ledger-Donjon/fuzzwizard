@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2026 LEDGER SAS
+# SPDX-License-Identifier: MIT
+
 [package]
 name = "notificator"
 version = "0.1.0"

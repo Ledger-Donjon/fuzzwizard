@@ -1,0 +1,1326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Third-Party Licenses — Fuzzwizard</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; }
+  h1 { border-bottom: 2px solid currentColor; padding-bottom: .3em; }
+  h2 { margin-top: 2.5rem; }
+  h3 { margin-top: 1.5rem; }
+  details { margin: .5rem 0; }
+  summary { cursor: pointer; font-weight: 600; }
+  pre { background: #f6f6f6; padding: 1rem; overflow-x: auto; border-radius: 4px; font-size: .85em; white-space: pre-wrap; word-wrap: break-word; }
+  @media (prefers-color-scheme: dark) { pre { background: #1e1e1e; } }
+  .license-group { margin-bottom: 2rem; padding-bottom: 1rem; border-bottom: 1px solid #ddd; }
+  .license-tag { display: inline-block; background: #0969da; color: #fff; padding: .1em .5em; border-radius: 3px; font-size: .85em; margin-left: .5em; }
+  .crate-list { margin: .5rem 0; padding-left: 1.5rem; }
+  .crate-list li { margin: .2rem 0; }
+  @media (prefers-color-scheme: dark) { .license-tag { background: #388bfd; } .license-group { border-bottom-color: #444; } }
+</style>
+</head>
+<body>
+<h1>Third-Party Licenses</h1>
+<p>This page lists the third-party open-source components used by <strong>Fuzzwizard</strong>, together with their licence texts. It is generated automatically from <code>Cargo.lock</code> by <a href="https://github.com/EmbarkStudios/cargo-about">cargo-about</a>.</p>
+
+<h2>Summary</h2>
+<table>
+<thead><tr><th>License</th><th>Count</th></tr></thead>
+<tbody>
+<tr><td>MIT License</td><td>223</td></tr>
+<tr><td>Unicode License v3</td><td>19</td></tr>
+<tr><td>Apache License 2.0</td><td>3</td></tr>
+<tr><td>BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License</td><td>2</td></tr>
+<tr><td>zlib License</td><td>2</td></tr>
+</tbody>
+</table>
+
+<h2>Licenses</h2>
+<div class="license-group">
+<h3>Apache License 2.0 <span class="license-tag">Apache-2.0</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>openssl</strong> v0.10.73</li>
+</ul>
+<details>
+<summary>License text</summary>
+<pre>                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      &quot;License&quot; shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      &quot;Licensor&quot; shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      &quot;Legal Entity&quot; shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      &quot;control&quot; means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      &quot;You&quot; (or &quot;Your&quot;) shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      &quot;Source&quot; form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      &quot;Object&quot; form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      &quot;Work&quot; shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      &quot;Derivative Works&quot; shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      &quot;Contribution&quot; shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, &quot;submitted&quot;
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as &quot;Not a Contribution.&quot;
+
+      &quot;Contributor&quot; shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a &quot;NOTICE&quot; text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an &quot;AS IS&quot; BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets &quot;{}&quot;
+      replaced with your own identifying information. (Don&#x27;t include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same &quot;printed page&quot; as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright {yyyy} {name of copyright owner}
+
+   Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
+</pre>
+</details>
+</div>
+<div class="license-group">
+<h3>Apache License 2.0 <span class="license-tag">Apache-2.0</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>ryu</strong> v1.0.20</li>
+<li><strong>sync_wrapper</strong> v1.0.2</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License <span class="license-tag">BSD-3-Clause</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>matchit</strong> v0.8.4</li>
+</ul>
+<details>
+<summary>License text</summary>
+<pre>BSD 3-Clause License
+
+Copyright (c) 2013, Julien Schmidt
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS &quot;AS IS&quot;
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+</pre>
+</details>
+</div>
+<div class="license-group">
+<h3>BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License <span class="license-tag">BSD-3-Clause</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>encoding_rs</strong> v0.8.35</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>instability</strong> v0.3.9</li>
+</ul>
+<details>
+<summary>License text</summary>
+<pre># MIT License
+
+Copyright (c) 2020 Stephen M. Coakley
+Copyright (c) The Ratatui Developers
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+</pre>
+</details>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>sha3</strong> v0.10.8</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>core-foundation-sys</strong> v0.8.7</li>
+<li><strong>core-foundation</strong> v0.9.4</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>hex</strong> v0.4.3</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>form_urlencoded</strong> v1.2.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>idna</strong> v1.0.3</li>
+<li><strong>percent-encoding</strong> v2.3.1</li>
+<li><strong>url</strong> v2.5.4</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>backtrace</strong> v0.3.74</li>
+<li><strong>cfg-if</strong> v1.0.0</li>
+<li><strong>js-sys</strong> v0.3.77</li>
+<li><strong>openssl-probe</strong> v0.1.6</li>
+<li><strong>openssl-sys</strong> v0.9.109</li>
+<li><strong>rustc-demangle</strong> v0.1.24</li>
+<li><strong>socket2</strong> v0.5.9</li>
+<li><strong>wasm-bindgen-backend</strong> v0.2.100</li>
+<li><strong>wasm-bindgen-futures</strong> v0.4.50</li>
+<li><strong>wasm-bindgen-macro-support</strong> v0.2.100</li>
+<li><strong>wasm-bindgen-macro</strong> v0.2.100</li>
+<li><strong>wasm-bindgen-shared</strong> v0.2.100</li>
+<li><strong>wasm-bindgen</strong> v0.2.100</li>
+<li><strong>web-sys</strong> v0.3.77</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>mio</strong> v1.0.3</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>errno</strong> v0.3.11</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>mime</strong> v0.3.17</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>bitflags</strong> v2.9.0</li>
+<li><strong>log</strong> v0.4.28</li>
+<li><strong>num-traits</strong> v0.2.19</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>libc</strong> v0.2.171</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>hyper</strong> v1.6.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>either</strong> v1.15.0</li>
+<li><strong>itertools</strong> v0.13.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>tempfile</strong> v3.19.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>object</strong> v0.36.7</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>fs2</strong> v0.4.3</li>
+<li><strong>gimli</strong> v0.31.1</li>
+<li><strong>heck</strong> v0.5.0</li>
+<li><strong>unicode-segmentation</strong> v1.12.0</li>
+<li><strong>unicode-width</strong> v0.1.14</li>
+<li><strong>unicode-width</strong> v0.2.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>schannel</strong> v0.1.27</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>winapi</strong> v0.3.9</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>httparse</strong> v1.10.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>futures-channel</strong> v0.3.31</li>
+<li><strong>futures-core</strong> v0.3.31</li>
+<li><strong>futures-sink</strong> v0.3.31</li>
+<li><strong>futures-task</strong> v0.3.31</li>
+<li><strong>futures-util</strong> v0.3.31</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>hashbrown</strong> v0.15.3</li>
+<li><strong>hashbrown</strong> v0.16.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>serde_urlencoded</strong> v0.7.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>httpdate</strong> v1.0.3</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>lock_api</strong> v0.4.12</li>
+<li><strong>parking_lot</strong> v0.12.3</li>
+<li><strong>parking_lot_core</strong> v0.9.10</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>humantime</strong> v2.3.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>native-tls</strong> v0.2.14</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>indexmap</strong> v2.9.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>equivalent</strong> v1.0.2</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>addr2line</strong> v0.24.2</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>scopeguard</strong> v1.2.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>reqwest</strong> v0.12.24</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>digest</strong> v0.10.7</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>fnv</strong> v1.0.7</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>redox_syscall</strong> v0.5.11</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>stable_deref_trait</strong> v1.2.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>hyper-tls</strong> v0.6.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>foreign-types-shared</strong> v0.1.1</li>
+<li><strong>foreign-types</strong> v0.3.2</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>h2</strong> v0.4.10</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>http</strong> v1.3.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>signal-hook-mio</strong> v0.2.5</li>
+<li><strong>signal-hook-registry</strong> v1.4.2</li>
+<li><strong>signal-hook</strong> v0.3.18</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>bytes</strong> v1.11.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>smallvec</strong> v1.15.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>pin-utils</strong> v0.1.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>want</strong> v0.3.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>block-buffer</strong> v0.10.4</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>keccak</strong> v0.1.6</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>try-lock</strong> v0.2.5</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>getrandom</strong> v0.3.2</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>unicode-truncate</strong> v1.1.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>slab</strong> v0.4.9</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>bumpalo</strong> v3.17.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>ppv-lite86</strong> v0.2.21</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>tokio-native-tls</strong> v0.3.1</li>
+<li><strong>tracing-core</strong> v0.1.33</li>
+<li><strong>tracing</strong> v0.1.41</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>tower-layer</strong> v0.3.3</li>
+<li><strong>tower-service</strong> v0.3.3</li>
+<li><strong>tower</strong> v0.5.2</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>axum</strong> v0.8.4</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>tower-http</strong> v0.6.6</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>http-body</strong> v1.0.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>http-body-util</strong> v0.1.3</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>iana-time-zone-haiku</strong> v0.1.2</li>
+<li><strong>iana-time-zone</strong> v0.1.63</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>document-features</strong> v0.2.12</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>litrs</strong> v1.0.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>cpufeatures</strong> v0.2.17</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>crypto-common</strong> v0.1.6</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>openssl-macros</strong> v0.1.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>rustls-pki-types</strong> v1.12.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>hyper-util</strong> v0.1.14</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>system-configuration-sys</strong> v0.6.0</li>
+<li><strong>system-configuration</strong> v0.6.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>idna_adapter</strong> v1.2.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>synstructure</strong> v0.13.2</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>ipnet</strong> v2.11.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>rand</strong> v0.9.2</li>
+<li><strong>rand_chacha</strong> v0.9.0</li>
+<li><strong>rand_core</strong> v0.9.3</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>iri-string</strong> v0.7.8</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>axum-macros</strong> v0.5.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>axum-core</strong> v0.5.2</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>zerocopy</strong> v0.8.26</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>encoding_rs</strong> v0.8.35</li>
+<li><strong>utf8_iter</strong> v1.0.4</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>lru</strong> v0.12.5</li>
+<li><strong>lru</strong> v0.16.3</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>static_assertions</strong> v1.1.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>darling</strong> v0.20.11</li>
+<li><strong>darling_core</strong> v0.20.11</li>
+<li><strong>darling_macro</strong> v0.20.11</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>zeroize</strong> v1.8.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>strum</strong> v0.26.3</li>
+<li><strong>strum_macros</strong> v0.26.4</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>tokio-macros</strong> v2.5.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>compact_str</strong> v0.8.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>castaway</strong> v0.2.4</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>matchit</strong> v0.8.4</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>convert_case</strong> v0.7.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>backend</strong> v0.1.0</li>
+<li><strong>fuzztui</strong> v0.1.0</li>
+<li><strong>notificator</strong> v0.1.0</li>
+<li><strong>scheduler</strong> v0.1.0</li>
+<li><strong>chrono</strong> v0.4.42</li>
+<li><strong>dispatch</strong> v0.2.0</li>
+<li><strong>r-efi</strong> v5.2.0</li>
+<li><strong>winapi-i686-pc-windows-gnu</strong> v0.4.0</li>
+<li><strong>winapi-x86_64-pc-windows-gnu</strong> v0.4.0</li>
+<li><strong>windows-core</strong> v0.61.2</li>
+<li><strong>windows-implement</strong> v0.60.0</li>
+<li><strong>windows-interface</strong> v0.59.1</li>
+<li><strong>windows-link</strong> v0.1.1</li>
+<li><strong>windows-link</strong> v0.2.0</li>
+<li><strong>windows-registry</strong> v0.5.2</li>
+<li><strong>windows-result</strong> v0.3.4</li>
+<li><strong>windows-strings</strong> v0.4.2</li>
+<li><strong>windows-sys</strong> v0.52.0</li>
+<li><strong>windows-sys</strong> v0.59.0</li>
+<li><strong>windows-sys</strong> v0.61.1</li>
+<li><strong>windows-targets</strong> v0.52.6</li>
+<li><strong>windows_aarch64_gnullvm</strong> v0.52.6</li>
+<li><strong>windows_aarch64_msvc</strong> v0.52.6</li>
+<li><strong>windows_i686_gnu</strong> v0.52.6</li>
+<li><strong>windows_i686_gnullvm</strong> v0.52.6</li>
+<li><strong>windows_i686_msvc</strong> v0.52.6</li>
+<li><strong>windows_x86_64_gnu</strong> v0.52.6</li>
+<li><strong>windows_x86_64_gnullvm</strong> v0.52.6</li>
+<li><strong>windows_x86_64_msvc</strong> v0.52.6</li>
+<li><strong>wit-bindgen-rt</strong> v0.39.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>tokio-util</strong> v0.7.15</li>
+<li><strong>tokio</strong> v1.44.2</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>miniz_oxide</strong> v0.8.8</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>ident_case</strong> v1.0.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>crossterm</strong> v0.28.1</li>
+<li><strong>crossterm</strong> v0.29.0</li>
+<li><strong>crossterm_winapi</strong> v0.9.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>ftail</strong> v0.3.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>adler2</strong> v2.0.0</li>
+<li><strong>anyhow</strong> v1.0.100</li>
+<li><strong>atomic-waker</strong> v1.1.2</li>
+<li><strong>ctrlc</strong> v3.5.0</li>
+<li><strong>displaydoc</strong> v0.2.5</li>
+<li><strong>fastrand</strong> v2.3.0</li>
+<li><strong>indoc</strong> v2.0.7</li>
+<li><strong>itoa</strong> v1.0.15</li>
+<li><strong>linux-raw-sys</strong> v0.4.15</li>
+<li><strong>linux-raw-sys</strong> v0.9.3</li>
+<li><strong>once_cell</strong> v1.21.3</li>
+<li><strong>paste</strong> v1.0.15</li>
+<li><strong>pin-project-lite</strong> v0.2.16</li>
+<li><strong>proc-macro2</strong> v1.0.94</li>
+<li><strong>quote</strong> v1.0.40</li>
+<li><strong>rustix</strong> v0.38.44</li>
+<li><strong>rustix</strong> v1.0.5</li>
+<li><strong>rustversion</strong> v1.0.20</li>
+<li><strong>serde</strong> v1.0.228</li>
+<li><strong>serde_core</strong> v1.0.228</li>
+<li><strong>serde_derive</strong> v1.0.228</li>
+<li><strong>serde_json</strong> v1.0.145</li>
+<li><strong>serde_path_to_error</strong> v0.1.17</li>
+<li><strong>syn</strong> v2.0.100</li>
+<li><strong>thiserror-impl</strong> v1.0.69</li>
+<li><strong>thiserror</strong> v1.0.69</li>
+<li><strong>unicode-ident</strong> v1.0.18</li>
+<li><strong>wasi</strong> v0.11.0+wasi-snapshot-preview1</li>
+<li><strong>wasi</strong> v0.14.2+wasi-0.2.4</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>allocator-api2</strong> v0.2.21</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>diesel</strong> v2.2.9</li>
+<li><strong>diesel_derives</strong> v2.2.4</li>
+<li><strong>diesel_table_macro_syntax</strong> v0.2.0</li>
+<li><strong>dsl_auto_type</strong> v0.1.3</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>android_system_properties</strong> v0.1.5</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>typenum</strong> v1.18.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>r2d2</strong> v0.8.10</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>scheduled-thread-pool</strong> v0.2.7</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>base64</strong> v0.22.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>byteorder</strong> v1.5.0</li>
+<li><strong>memchr</strong> v2.7.4</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>nix</strong> v0.30.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>strsim</strong> v0.11.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>security-framework-sys</strong> v2.14.0</li>
+<li><strong>security-framework</strong> v2.11.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>pq-sys</strong> v0.7.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>derive_more-impl</strong> v2.0.1</li>
+<li><strong>derive_more</strong> v2.0.1</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>ratatui</strong> v0.29.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>generic-array</strong> v0.14.7</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>MIT License <span class="license-tag">MIT</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>cassowary</strong> v0.3.0</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>Unicode License v3 <span class="license-tag">Unicode-3.0</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>unicode-ident</strong> v1.0.18</li>
+</ul>
+<details>
+<summary>License text</summary>
+<pre>UNICODE LICENSE V3
+
+COPYRIGHT AND PERMISSION NOTICE
+
+Copyright © 1991-2023 Unicode, Inc.
+
+NOTICE TO USER: Carefully read the following legal agreement. BY
+DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of data files and any associated documentation (the &quot;Data Files&quot;) or
+software and any associated documentation (the &quot;Software&quot;) to deal in the
+Data Files or Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, and/or sell
+copies of the Data Files or Software, and to permit persons to whom the
+Data Files or Software are furnished to do so, provided that either (a)
+this copyright and permission notice appear with all copies of the Data
+Files or Software, or (b) this copyright and permission notice appear in
+associated Documentation.
+
+THE DATA FILES AND SOFTWARE ARE PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+THIRD PARTY RIGHTS.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+FILES OR SOFTWARE.
+
+Except as contained in this notice, the name of a copyright holder shall
+not be used in advertising or otherwise to promote the sale, use or other
+dealings in these Data Files or Software without prior written
+authorization of the copyright holder.
+</pre>
+</details>
+</div>
+<div class="license-group">
+<h3>Unicode License v3 <span class="license-tag">Unicode-3.0</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>icu_collections</strong> v2.0.0</li>
+<li><strong>icu_locale_core</strong> v2.0.0</li>
+<li><strong>icu_normalizer</strong> v2.0.0</li>
+<li><strong>icu_normalizer_data</strong> v2.0.0</li>
+<li><strong>icu_properties</strong> v2.0.1</li>
+<li><strong>icu_properties_data</strong> v2.0.1</li>
+<li><strong>icu_provider</strong> v2.0.0</li>
+<li><strong>litemap</strong> v0.8.0</li>
+<li><strong>potential_utf</strong> v0.1.2</li>
+<li><strong>tinystr</strong> v0.8.1</li>
+<li><strong>writeable</strong> v0.6.1</li>
+<li><strong>yoke-derive</strong> v0.8.0</li>
+<li><strong>yoke</strong> v0.8.0</li>
+<li><strong>zerofrom-derive</strong> v0.1.6</li>
+<li><strong>zerofrom</strong> v0.1.6</li>
+<li><strong>zerotrie</strong> v0.2.2</li>
+<li><strong>zerovec-derive</strong> v0.11.1</li>
+<li><strong>zerovec</strong> v0.11.2</li>
+</ul>
+</div>
+<div class="license-group">
+<h3>zlib License <span class="license-tag">Zlib</span></h3>
+<p>Used by:</p>
+<ul class="crate-list">
+<li><strong>foldhash</strong> v0.1.5</li>
+<li><strong>foldhash</strong> v0.2.0</li>
+</ul>
+<details>
+<summary>License text</summary>
+<pre>Copyright (c) 2024 Orson Peters
+
+This software is provided &#x27;as-is&#x27;, without any express or implied warranty. In
+no event will the authors be held liable for any damages arising from the use of
+this software.
+
+Permission is granted to anyone to use this software for any purpose, including
+commercial applications, and to alter it and redistribute it freely, subject to
+the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not claim
+    that you wrote the original software. If you use this software in a product,
+    an acknowledgment in the product documentation would be appreciated but is
+    not required.
+
+2. Altered source versions must be plainly marked as such, and must not be
+    misrepresented as being the original software.
+
+3. This notice may not be removed or altered from any source distribution.</pre>
+</details>
+</div>
+
+<hr>
+<p><small>Generated by <a href="https://github.com/EmbarkStudios/cargo-about">cargo-about</a>.</small></p>
+</body>
+</html>

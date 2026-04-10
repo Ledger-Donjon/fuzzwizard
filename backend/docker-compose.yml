@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2026 LEDGER SAS
+# SPDX-License-Identifier: MIT
+
 services:
   postgres:
     container_name: postgres

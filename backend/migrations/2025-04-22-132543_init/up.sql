@@ -1,3 +1,6 @@
+-- SPDX-FileCopyrightText: © 2026 LEDGER SAS
+-- SPDX-License-Identifier: MIT
+
 -- Your SQL goes here
 
 CREATE TABLE crashes (
