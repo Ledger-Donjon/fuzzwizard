@@ -63,6 +63,10 @@ Complete documentation is available in the [doc/](doc/) directory:
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+Licensed under the MIT License (see [`LICENSE`](./LICENSE)). © 2026 LEDGER SAS and contributors.
 
-All source files include SPDX license identifiers in accordance with the [REUSE Specification](https://reuse.software/spec/).
+The project follows the [REUSE 3.3](https://reuse.software/) specification; every file carries an `SPDX-License-Identifier` header.
+
+## Third-party components
+
+Fuzzwizard depends on third-party open-source components listed (with their respective licences) in [`doc/THIRD_PARTY_LICENSES.html`](./doc/THIRD_PARTY_LICENSES.html), automatically generated from `Cargo.lock` via `cargo-about`. An SPDX SBOM is also published with each release.

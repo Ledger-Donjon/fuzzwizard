@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: © 2026 LEDGER SAS
+# SPDX-License-Identifier: MIT
+
+version = 1
+
+[[annotations]]
+path = ["**"]
+SPDX-FileCopyrightText = "© 2026 LEDGER SAS"
+SPDX-License-Identifier = "MIT"
+precedence = "closest"
+
+[[annotations]]
+path = [
+    "Cargo.lock",
+    "config.json",
+    "install/config.json",
+]
+SPDX-FileCopyrightText = "© 2026 LEDGER SAS"
+SPDX-License-Identifier = "MIT"
+precedence = "override"
