@@ -308,7 +308,7 @@ impl App {
                     .collect();
 
                 if !new_crashes.is_empty() {
-                    new_crashes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                    new_crashes.sort_by_key(|c| std::cmp::Reverse(c.created_at));
                     // Get the date of the last (most recent) crash
                     let last_date = new_crashes.first().map(|c| c.created_at);
                     return Ok((new_crashes, last_date));
@@ -379,7 +379,7 @@ impl App {
         }
 
         if !new_crashes.is_empty() {
-            new_crashes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            new_crashes.sort_by_key(|c| std::cmp::Reverse(c.created_at));
             // Get the date of the last (most recent) crash
             let new_date = new_crashes.first().map(|c| c.created_at).unwrap();
             Ok((new_crashes, Some(new_date)))
@@ -436,7 +436,8 @@ impl App {
                 while let Ok(update_msg) = receiver.try_recv() {
                     // Merge new crashes with existing ones
                     self.crashes.append(&mut update_msg.crashes.clone());
-                    self.crashes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                    self.crashes
+                        .sort_by_key(|c| std::cmp::Reverse(c.created_at));
                     self.crashes.truncate(10);
 
                     if let Some(date) = update_msg.last_crashes_date {
@@ -573,14 +574,12 @@ impl App {
                         }
                     }
                 },
-                KeyCode::Enter => {
-                    // Select file from summary table (resolve from row so order matches)
+                KeyCode::Enter
                     if self.coverage.mode == CoverageMode::FileList
                         && self.coverage.summary_index > 0
-                        && self.coverage.summary_index < self.coverage.summary_rows.len()
-                    {
-                        self.load_coverage_file(); // resolves file from summary row and loads
-                    }
+                        && self.coverage.summary_index < self.coverage.summary_rows.len() =>
+                {
+                    self.load_coverage_file();
                 }
                 KeyCode::Char('q') => {
                     // Always return to main view (close coverage)
@@ -607,18 +606,16 @@ impl App {
         // Handle task menu
         if self.task_menu_open {
             match key_event.code {
-                KeyCode::Up => {
-                    if self.task_menu_selection > 0 {
-                        self.task_menu_selection -= 1;
-                    }
+                KeyCode::Up if self.task_menu_selection > 0 => {
+                    self.task_menu_selection -= 1;
                 }
-                KeyCode::Down => {
-                    if self.task_menu_selection < self.task_menu_actions.len().saturating_sub(1) {
-                        self.task_menu_selection += 1;
-                    }
+                KeyCode::Down
+                    if self.task_menu_selection
+                        < self.task_menu_actions.len().saturating_sub(1) =>
+                {
+                    self.task_menu_selection += 1;
                 }
                 KeyCode::Enter => {
-                    // Execute selected action
                     self.execute_task_action();
                     self.task_menu_open = false;
                 }
@@ -680,39 +677,31 @@ impl App {
                     }
                 }
             }
-            KeyCode::Char('m') => {
-                // Open task management menu if in scheduler view and a task is selected
-                // Only if the scheduler is running
-                if self.tabs.index > 0 {
-                    let scheduler_index = self.tabs.index - 1;
-                    // Check if scheduler is running
-                    if scheduler_index < self.launcher_cache.schedulers.len() {
-                        let scheduler_status =
-                            self.launcher_cache.schedulers[scheduler_index].status;
-                        if !matches!(scheduler_status, ProcessStatus::Running) {
-                            return; // Scheduler is stopped, cannot interact with tasks
-                        }
-                    }
-                    let task_status = if let Some(tasks) = self.tasks_cache.get(&scheduler_index) {
-                        if !tasks.is_empty() && self.task_selection_index < tasks.len() {
-                            Some(tasks[self.task_selection_index].is_running)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-                    if let Some(status) = task_status {
-                        self.open_task_menu(status);
+            KeyCode::Char('m') if self.tabs.index > 0 => {
+                let scheduler_index = self.tabs.index - 1;
+                if scheduler_index < self.launcher_cache.schedulers.len() {
+                    let scheduler_status = self.launcher_cache.schedulers[scheduler_index].status;
+                    if !matches!(scheduler_status, ProcessStatus::Running) {
+                        return;
                     }
                 }
-            }
-            KeyCode::Char('d') => {
-                if self.tabs.index > 0 {
-                    let scheduler_index = self.tabs.index - 1;
-                    if let Some(task) = self.selected_task(scheduler_index) {
-                        self.display_coverage(scheduler_index, &task);
+                let task_status = if let Some(tasks) = self.tasks_cache.get(&scheduler_index) {
+                    if !tasks.is_empty() && self.task_selection_index < tasks.len() {
+                        Some(tasks[self.task_selection_index].is_running)
+                    } else {
+                        None
                     }
+                } else {
+                    None
+                };
+                if let Some(status) = task_status {
+                    self.open_task_menu(status);
+                }
+            }
+            KeyCode::Char('d') if self.tabs.index > 0 => {
+                let scheduler_index = self.tabs.index - 1;
+                if let Some(task) = self.selected_task(scheduler_index) {
+                    self.display_coverage(scheduler_index, &task);
                 }
             }
             _ => {}
@@ -1780,12 +1769,7 @@ impl Widget for &App {
                     let selected_data_idx = self.coverage.summary_index.saturating_sub(1);
                     let start_idx = selected_data_idx
                         .saturating_sub(available_height.saturating_sub(1) as usize)
-                        .min(
-                            data_rows
-                                .len()
-                                .saturating_sub(available_height as usize)
-                                .max(0),
-                        );
+                        .min(data_rows.len().saturating_sub(available_height as usize));
                     let end_idx = (start_idx + available_height as usize).min(data_rows.len());
                     let visible_rows = if start_idx < data_rows.len() {
                         data_rows[start_idx..end_idx].to_vec()

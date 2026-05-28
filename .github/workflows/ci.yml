@@ -50,7 +50,9 @@ jobs:
       uses: actions-rust-lang/setup-rust-toolchain@v1
 
     - name: Install cargo-cyclonedx
-      run: cargo install cargo-cyclonedx
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-cyclonedx
 
     - name: Generate CycloneDX SBOMs
       run: cargo cyclonedx --all --spec-version 1.5 --format json --no-build-deps
@@ -70,7 +72,9 @@ jobs:
       uses: actions-rust-lang/setup-rust-toolchain@v1
 
     - name: Install cargo-about
-      run: cargo install cargo-about
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-about
 
     - name: Generate third-party license report
       run: mkdir -p doc && cargo about generate about.hbs -o doc/THIRD_PARTY_LICENSES.html -c about.toml
