@@ -10,7 +10,7 @@ license = "MIT"
 [dependencies]
 axum = {version = "0.8.3", features = ["macros"] }
 chrono = {version = "0.4.41", features = ["serde"] }
-diesel = { version = "2.2.9", features = ["postgres", "chrono", "r2d2"] }
+diesel = { version = "2.3.8", features = ["postgres", "chrono", "r2d2"] }
 r2d2 = "0.8"
 log = "0.4.28"
 serde = { version = "1.0.219", features = ["derive"] }
