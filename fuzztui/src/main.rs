@@ -54,8 +54,17 @@ pub struct CrashInfo {
 
 #[derive(Debug, Clone, PartialEq)]
 enum CoverageMode {
+    Loading,  // Waiting for background coverage computation
     FileList, // Showing list of files with coverage (includes summary at top)
     FileView, // Showing file with line-by-line coverage
+}
+
+/// Result sent back from the background coverage thread.
+enum CoverageResult {
+    /// Summary report (from `get_task_coverage`).
+    Summary(String),
+    /// File-level annotated source (from `get_task_file_coverage`).
+    FileDetail(String),
 }
 
 // Cache structures for display data (to avoid blocking during updates)
@@ -178,6 +187,8 @@ pub struct App {
     task_menu_selection: usize,     // Index of selected action in the menu
     task_menu_actions: Vec<String>, // Available actions for the selected task
     coverage: CoverageViewState,
+    coverage_receiver: mpsc::Receiver<CoverageResult>,
+    coverage_sender: mpsc::Sender<CoverageResult>,
 }
 
 impl App {
@@ -228,6 +239,8 @@ impl App {
             }
         });
 
+        let (coverage_sender, coverage_receiver) = mpsc::channel();
+
         let mut app = Self {
             tabs: TabsState::new(vec![]),
             launcher: launcher.clone(),
@@ -253,6 +266,8 @@ impl App {
             task_menu_selection: 0,
             task_menu_actions: Vec::new(),
             coverage: CoverageViewState::empty(),
+            coverage_receiver,
+            coverage_sender,
         };
         // Initialize cache from launcher
         app.update_launcher_cache();
@@ -491,6 +506,32 @@ impl App {
                 }
             }
 
+            // Check for coverage results from background thread (non-blocking).
+            // Only apply if the view is still open and waiting; discard stale results.
+            while let Ok(result) = self.coverage_receiver.try_recv() {
+                if self.coverage.view_open && self.coverage.mode == CoverageMode::Loading {
+                    match result {
+                        CoverageResult::Summary(text) => {
+                            let (rows, paths, file_col) =
+                                Self::parse_coverage_summary(&text);
+                            self.coverage.summary_index =
+                                if rows.len() > 1 { 1 } else { 0 };
+                            self.coverage.summary_rows = rows;
+                            self.coverage.file_paths = paths;
+                            self.coverage.file_col = file_col;
+                            self.coverage.data = Some(text);
+                            self.coverage.file_data = None;
+                            self.coverage.mode = CoverageMode::FileList;
+                        }
+                        CoverageResult::FileDetail(text) => {
+                            self.coverage.file_data = Some(text);
+                            self.coverage.mode = CoverageMode::FileView;
+                            self.coverage.scroll_offset = 0;
+                        }
+                    }
+                }
+            }
+
             terminal.draw(|frame: &mut Frame<'_>| self.draw(frame))?;
             self.handle_events()?;
         }
@@ -544,8 +585,8 @@ impl App {
             match key_event.code {
                 KeyCode::Up => {
                     match self.coverage.mode {
+                        CoverageMode::Loading => {}
                         CoverageMode::FileList => {
-                            // Row 0 is header (not selectable). Data rows from 1 to len-1.
                             if self.coverage.summary_rows.len() > 1
                                 && self.coverage.summary_index > 1
                             {
@@ -560,6 +601,7 @@ impl App {
                     }
                 }
                 KeyCode::Down => match self.coverage.mode {
+                    CoverageMode::Loading => {}
                     CoverageMode::FileList => {
                         let max_index = self.coverage.summary_rows.len().saturating_sub(1);
                         if self.coverage.summary_rows.len() > 1
@@ -811,44 +853,37 @@ impl App {
     }
 
     fn display_coverage(&mut self, scheduler_index: usize, task: &TaskInfo) {
-        // Use blocking read: background thread may hold write lock during
-        // `update_status()` (often longer in containers). try_read() fails spuriously then.
-        match self.launcher.read() {
-            Ok(launcher) => {
-                if scheduler_index >= launcher.scheduler_processes.len() {
-                    self.coverage.data = Some("Error: Scheduler not found".to_string());
-                    self.coverage.view_open = true;
-                    self.coverage.scroll_offset = 0;
-                    self.coverage.mode = CoverageMode::FileList;
-                    return;
+        self.coverage.view_open = true;
+        self.coverage.scroll_offset = 0;
+        self.coverage.mode = CoverageMode::Loading;
+        self.coverage.data = None;
+        self.coverage.file_data = None;
+        self.coverage.summary_rows = Vec::new();
+        self.coverage.file_paths = Vec::new();
+        self.coverage.file_col = None;
+        self.coverage.summary_index = 0;
+
+        let launcher = self.launcher.clone();
+        let sha = task.sha;
+        let tx = self.coverage_sender.clone();
+
+        thread::spawn(move || {
+            let result = match launcher.read() {
+                Ok(l) => {
+                    if scheduler_index >= l.scheduler_processes.len() {
+                        "Error: Scheduler not found".to_string()
+                    } else {
+                        l.scheduler_processes[scheduler_index]
+                            .scheduler
+                            .get_task_coverage(&sha)
+                    }
                 }
-
-                let scheduler = &launcher.scheduler_processes[scheduler_index].scheduler;
-                let coverage_info = scheduler.get_task_coverage(&task.sha);
-                self.coverage.data = Some(coverage_info.clone());
-                let (rows, paths, file_col) = Self::parse_coverage_summary(&coverage_info);
-                self.coverage.summary_index = if rows.len() > 1 { 1 } else { 0 };
-                self.coverage.summary_rows = rows;
-                self.coverage.file_paths = paths;
-                self.coverage.file_col = file_col;
-                self.coverage.file_data = None;
-
-                self.coverage.view_open = true;
-                self.coverage.scroll_offset = 0;
-                self.coverage.mode = CoverageMode::FileList;
-            }
-            Err(_) => {
-                self.coverage.data =
-                    Some("Error: Scheduler lock poisoned (internal error)".to_string());
-                self.coverage.view_open = true;
-                self.coverage.scroll_offset = 0;
-                self.coverage.mode = CoverageMode::FileList;
-                self.coverage.summary_rows = Vec::new();
-                self.coverage.file_paths = Vec::new();
-                self.coverage.file_col = None;
-                self.coverage.summary_index = 0;
-            }
-        }
+                Err(_) => {
+                    "Error: Scheduler lock poisoned (internal error)".to_string()
+                }
+            };
+            let _ = tx.send(CoverageResult::Summary(result));
+        });
     }
 
     /// Path of the file at the currently selected summary row.
@@ -1034,7 +1069,6 @@ impl App {
             Some(std::path::PathBuf::from(&file_path))
         };
 
-        // Get task SHA from cache
         let task_sha = if let Some(tasks) = self.tasks_cache.get(&scheduler_index) {
             if self.task_selection_index < tasks.len() {
                 tasks[self.task_selection_index].sha
@@ -1045,27 +1079,30 @@ impl App {
             return;
         };
 
-        match self.launcher.read() {
-            Ok(launcher) => {
-                if scheduler_index < launcher.scheduler_processes.len() {
-                    let scheduler = &launcher.scheduler_processes[scheduler_index].scheduler;
-                    let file_coverage =
-                        scheduler.get_task_file_coverage(&task_sha, file_path_opt.as_deref());
-                    self.coverage.file_data = Some(file_coverage);
-                    self.coverage.mode = CoverageMode::FileView;
-                    self.coverage.scroll_offset = 0;
-                } else {
-                    self.coverage.file_data =
-                        Some("Error: scheduler index out of range.".to_string());
-                    self.coverage.mode = CoverageMode::FileView;
+        self.coverage.mode = CoverageMode::Loading;
+        self.coverage.file_data = None;
+        self.coverage.scroll_offset = 0;
+
+        let launcher = self.launcher.clone();
+        let tx = self.coverage_sender.clone();
+
+        thread::spawn(move || {
+            let result = match launcher.read() {
+                Ok(l) => {
+                    if scheduler_index < l.scheduler_processes.len() {
+                        l.scheduler_processes[scheduler_index]
+                            .scheduler
+                            .get_task_file_coverage(&task_sha, file_path_opt.as_deref())
+                    } else {
+                        "Error: scheduler index out of range.".to_string()
+                    }
                 }
-            }
-            Err(_) => {
-                self.coverage.file_data =
-                    Some("Could not read scheduler (lock poisoned). Restart fuzztui.".to_string());
-                self.coverage.mode = CoverageMode::FileView;
-            }
-        }
+                Err(_) => {
+                    "Could not read scheduler (lock poisoned). Restart fuzztui.".to_string()
+                }
+            };
+            let _ = tx.send(CoverageResult::FileDetail(result));
+        });
     }
     fn sync_tabs_with_schedulers(&mut self) {
         if let Ok(launcher) = self.launcher.try_read() {
@@ -1644,6 +1681,11 @@ impl Widget for &App {
 
             // Determine title and content based on mode
             let (title, coverage_text, show_file_list) = match self.coverage.mode {
+                CoverageMode::Loading => {
+                    let title = " Coverage ".to_string();
+                    let text = "Loading coverage data...".to_string();
+                    (title, text, false)
+                }
                 CoverageMode::FileList => {
                     let title = format!(" Coverage Summary ({}) ", self.coverage.data_row_count());
                     let text = String::new(); // Will be replaced by unified table
@@ -1850,6 +1892,15 @@ impl Widget for &App {
             // Add instructions at the bottom (with multi-line support)
             // Use cyan/yellow for better visibility on dark gray background
             let instruction_spans = match self.coverage.mode {
+                CoverageMode::Loading => {
+                    vec![
+                        " Q ".into(),
+                        " main view ".into(),
+                        " | ".into(),
+                        " Esc ".into(),
+                        " cancel ".into(),
+                    ]
+                }
                 CoverageMode::FileList => {
                     vec![
                         " Enter ".into(),

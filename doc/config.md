@@ -324,8 +324,9 @@ Enable or disable coverage collection.
 
 Directory that contains the LLVM tools `llvm-cov` and `llvm-profdata`, used when the scheduler analyzes coverage (FuzzTUI / API).
 
-- If omitted or `null`, the scheduler tries the environment variable `FUZZWIZARD_LLVM_BIN` (same semantics: directory path), then falls back to resolving those tool names from `PATH`.
-- Set this when LLVM is not on the default `PATH` (for example Homebrew: `/opt/homebrew/opt/llvm/bin`).
+- **Native mode** (no `container_image`): interpreted as a host path. If omitted or `null`, the scheduler tries the environment variable `FUZZWIZARD_LLVM_BIN` (same semantics: directory path), then falls back to resolving those tool names from `PATH`.
+- **Container mode** (`container_image` is set): interpreted as a path *inside* the container image. The `FUZZWIZARD_LLVM_BIN` environment variable is not used in container mode.
+- Set this when LLVM is not on the default `PATH`
 
 **Example**: `"/opt/homebrew/opt/llvm/bin"`
 
@@ -335,6 +336,7 @@ Docker/Podman image to use for executing fuzzers.
 
 - If set, fuzzers are executed in containers
 - Image must contain necessary tools (libFuzzer, etc.)
+- **The same image is also used to run `llvm-profdata` and `llvm-cov` when displaying coverage**, so it must include those tools.
 - Volumes are automatically mounted:
   - `/fuzzer/binary`: Fuzzer binary
   - `/fuzzer/crash_dir/`: Crash directory

@@ -9,6 +9,137 @@ use log::{debug, info, warn};
 
 use crate::Sha;
 
+/// Where LLVM coverage tools (`llvm-profdata`, `llvm-cov`) are executed.
+///
+/// In container mode the same image that ran the fuzzer is used to run the
+/// tools inside an ephemeral `run --rm` container, ensuring the LLVM version
+/// matches the one that produced the `.profraw` / coverage-mapped binary.
+pub enum CoverageRunner {
+    /// Run LLVM tools directly on the host.
+    Host {
+        llvm_bin_dir: Option<PathBuf>,
+    },
+    /// Run LLVM tools inside an ephemeral container (`run --rm`).
+    Container {
+        binary: PathBuf,
+        image: String,
+        options: Vec<String>,
+        llvm_bin_dir: Option<PathBuf>,
+    },
+}
+
+/// A bind-mount for a container coverage command.
+struct Mount {
+    host_path: PathBuf,
+    read_only: bool,
+}
+
+/// Build the full argument list for a containerised coverage tool invocation.
+///
+/// The resulting vector is suitable for `Command::new(binary).args(...)`.
+fn build_container_args(
+    image: &str,
+    options: &[String],
+    tool: &str,
+    tool_args: &[String],
+    mounts: &[Mount],
+) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "run".into(),
+        "--rm".into(),
+        "--network=none".into(),
+        "--cap-drop".into(),
+        "ALL".into(),
+        "--security-opt".into(),
+        "no-new-privileges".into(),
+        "--read-only".into(),
+        "--pids-limit".into(),
+        "512".into(),
+        "--tmpfs".into(),
+        "/tmp:rw,noexec,nosuid,size=256m".into(),
+    ];
+
+    for m in mounts {
+        args.push("-v".into());
+        let host = m.host_path.to_string_lossy();
+        if m.read_only {
+            args.push(format!("{host}:{host}:ro"));
+        } else {
+            args.push(format!("{host}:{host}"));
+        }
+    }
+
+    for opt in options {
+        if !opt.is_empty() {
+            args.push(opt.clone());
+        }
+    }
+
+    args.push(image.into());
+    args.push(tool.into());
+    args.extend(tool_args.iter().cloned());
+    args
+}
+
+/// Format a "tool not found in image" error message.
+fn tool_not_found_error(tool: &str, image: &str) -> String {
+    format!(
+        "{tool} not found in container image '{image}'.\n\
+         The image used to run fuzzers must also provide llvm-profdata and llvm-cov \
+         (see fuzzwizard_scheduler_test/docker/ubuntu-llvm.Dockerfile), or set \
+         llvm_bin_directory to their path inside the image."
+    )
+}
+
+/// Returns `true` when the command output indicates the executable was not
+/// found (exit code 127, or well-known stderr patterns).
+fn is_tool_not_found(status: &std::process::ExitStatus, stderr: &str) -> bool {
+    if status.code() == Some(127) {
+        return true;
+    }
+    let lower = stderr.to_lowercase();
+    lower.contains("executable file not found")
+        || lower.contains("no such file or directory")
+}
+
+impl CoverageRunner {
+    /// Build a [`Command`] that runs `tool` with the given arguments.
+    ///
+    /// In `Host` mode the tool is resolved via `llvm_tool()`.
+    /// In `Container` mode an ephemeral `run --rm` container is launched with
+    /// identity mounts so that all path arguments remain valid inside the
+    /// container.
+    fn command(&self, tool: &str, tool_args: &[String], mounts: &[Mount]) -> Command {
+        match self {
+            CoverageRunner::Host { llvm_bin_dir } => {
+                let exe = llvm_tool(tool, llvm_bin_dir.as_deref());
+                let mut cmd = Command::new(exe);
+                cmd.args(tool_args);
+                cmd
+            }
+            CoverageRunner::Container {
+                binary,
+                image,
+                options,
+                llvm_bin_dir,
+            } => {
+                let resolved = llvm_tool_container(tool, llvm_bin_dir.as_deref());
+                let args = build_container_args(image, options, &resolved, tool_args, mounts);
+                let mut cmd = Command::new(binary);
+                cmd.args(&args);
+                cmd
+            }
+        }
+    }
+
+    fn image_name(&self) -> Option<&str> {
+        match self {
+            CoverageRunner::Host { .. } => None,
+            CoverageRunner::Container { image, .. } => Some(image),
+        }
+    }
+}
+
 /// Resolve LLVM tool binary: config directory first, then `FUZZWIZARD_LLVM_BIN`, then `PATH`.
 fn llvm_tool(name: &str, config_bin_dir: Option<&Path>) -> String {
     const ENV: &str = "FUZZWIZARD_LLVM_BIN";
@@ -27,31 +158,47 @@ fn llvm_tool(name: &str, config_bin_dir: Option<&Path>) -> String {
     name.to_string()
 }
 
+/// Resolve LLVM tool inside a container: prepend `llvm_bin_dir` if set,
+/// otherwise just return the bare tool name (resolved via container PATH).
+fn llvm_tool_container(name: &str, llvm_bin_dir: Option<&Path>) -> String {
+    if let Some(dir) = llvm_bin_dir {
+        dir.join(name).to_string_lossy().into_owned()
+    } else {
+        name.to_string()
+    }
+}
+
 /// Convert `.profraw` → indexed `.profdata` via `llvm-profdata merge`.
 fn merge_profdata(
     profraw: &Path,
     coverage_dir: &Path,
-    llvm_bin_dir: Option<&Path>,
+    runner: &CoverageRunner,
 ) -> Result<PathBuf, String> {
     let profdata = coverage_dir.join("coverage.profdata");
-    let exe = llvm_tool("llvm-profdata", llvm_bin_dir);
-    let args = vec![
+    let tool_args = vec![
         "merge".into(),
         "-sparse".into(),
         profraw.to_string_lossy().into_owned(),
         "-o".into(),
         profdata.to_string_lossy().into_owned(),
     ];
-    let output = Command::new(&exe)
-        .args(&args)
+    let mounts = vec![Mount {
+        host_path: coverage_dir.to_path_buf(),
+        read_only: false,
+    }];
+    let output = runner
+        .command("llvm-profdata", &tool_args, &mounts)
         .output()
         .map_err(|e| format!("llvm-profdata not available: {e}"))?;
 
     if !output.status.success() {
-        return Err(format!(
-            "llvm-profdata merge failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if let Some(img) = runner.image_name() {
+            if is_tool_not_found(&output.status, &stderr) {
+                return Err(tool_not_found_error("llvm-profdata", img));
+            }
+        }
+        return Err(format!("llvm-profdata merge failed:\n{stderr}"));
     }
     Ok(profdata)
 }
@@ -62,13 +209,13 @@ fn resolve_profdata_and_binary(
     binary_path: &Path,
     sha: &Sha,
     profraw_path: Option<&Path>,
-    llvm_bin_dir: Option<&Path>,
+    runner: &CoverageRunner,
 ) -> Result<(PathBuf, PathBuf), String> {
     let profraw = profraw_path.ok_or_else(|| "No profraw path set for this task".to_string())?;
     if !profraw.exists() {
         return Err(format!("Profraw file not found: {}", profraw.display()));
     }
-    let profdata = merge_profdata(profraw, coverage_dir, llvm_bin_dir)?;
+    let profdata = merge_profdata(profraw, coverage_dir, runner)?;
 
     let coverage_binary = coverage_dir.join(format!("fuzzer_{}.bin", hex::encode(sha)));
     let binary = if coverage_binary.exists() {
@@ -116,17 +263,18 @@ fn collect_filenames(v: &serde_json::Value, out: &mut HashSet<String>) {
 fn embedded_source_paths(
     profdata: &Path,
     binary: &Path,
-    llvm_bin_dir: Option<&Path>,
+    runner: &CoverageRunner,
+    coverage_dir: &Path,
 ) -> Vec<String> {
-    let exe = llvm_tool("llvm-cov", llvm_bin_dir);
-    let args = vec![
+    let tool_args = vec![
         "export".into(),
         "--summary-only".into(),
         "-instr-profile".into(),
         profdata.to_string_lossy().into_owned(),
         binary.to_string_lossy().into_owned(),
     ];
-    let output = match Command::new(&exe).args(&args).output() {
+    let mounts = coverage_mounts(coverage_dir, binary);
+    let output = match runner.command("llvm-cov", &tool_args, &mounts).output() {
         Ok(o) if o.status.success() => o,
         Ok(o) => {
             debug!(
@@ -151,11 +299,22 @@ fn embedded_source_paths(
     result
 }
 
+/// Result of path-equivalence detection: the flag for llvm-cov plus the host
+/// directory that should be mounted read-only for source-level commands.
+#[derive(Debug)]
+struct PathEquivalence {
+    flag: String,
+    host_source_dir: PathBuf,
+}
+
 /// Detect container/host path mismatch and return a `-path-equivalence=FROM,TO` flag if needed.
 ///
 /// Walks up from `host_binary_path` looking for an embedded source file on disk to derive
 /// the mapping between container and host paths.
-fn detect_path_equivalence(embedded_paths: &[String], host_binary_path: &Path) -> Option<String> {
+fn detect_path_equivalence(
+    embedded_paths: &[String],
+    host_binary_path: &Path,
+) -> Option<PathEquivalence> {
     if embedded_paths.is_empty() {
         return None;
     }
@@ -182,9 +341,12 @@ fn detect_path_equivalence(embedded_paths: &[String], host_binary_path: &Path) -
             if dir.join(emb_name).is_file() {
                 let host_str = dir.to_string_lossy();
                 let emb_str = emb_dir.to_string_lossy();
-                let result = format!("-path-equivalence={emb_str},{host_str}");
-                info!("Path equivalence detected: {result}");
-                return Some(result);
+                let flag = format!("-path-equivalence={emb_str},{host_str}");
+                info!("Path equivalence detected: {flag}");
+                return Some(PathEquivalence {
+                    flag,
+                    host_source_dir: dir.to_path_buf(),
+                });
             }
             candidate = dir.parent();
         }
@@ -193,15 +355,33 @@ fn detect_path_equivalence(embedded_paths: &[String], host_binary_path: &Path) -
     None
 }
 
+/// Collect the base mounts needed for coverage commands: `coverage_dir` (rw)
+/// and the binary's parent directory (ro, only if it lives outside `coverage_dir`).
+fn coverage_mounts(coverage_dir: &Path, binary: &Path) -> Vec<Mount> {
+    let mut mounts = vec![Mount {
+        host_path: coverage_dir.to_path_buf(),
+        read_only: false,
+    }];
+    if let Some(bin_dir) = binary.parent() {
+        if !bin_dir.starts_with(coverage_dir) {
+            mounts.push(Mount {
+                host_path: bin_dir.to_path_buf(),
+                read_only: true,
+            });
+        }
+    }
+    mounts
+}
+
 /// Run `llvm-cov report` and return the text output.
 fn run_report(
     profdata: &Path,
     binary: &Path,
-    llvm_bin_dir: Option<&Path>,
-    path_equiv: Option<&str>,
+    runner: &CoverageRunner,
+    path_equiv: Option<&PathEquivalence>,
+    coverage_dir: &Path,
 ) -> String {
-    let exe = llvm_tool("llvm-cov", llvm_bin_dir);
-    let mut args: Vec<String> = vec![
+    let mut tool_args: Vec<String> = vec![
         "report".into(),
         binary.to_string_lossy().into_owned(),
         "-instr-profile".into(),
@@ -209,14 +389,26 @@ fn run_report(
         "-use-color=false".into(),
     ];
     if let Some(pe) = path_equiv {
-        args.push(pe.to_string());
+        tool_args.push(pe.flag.clone());
     }
-    match Command::new(&exe).args(&args).output() {
+    let mut mounts = coverage_mounts(coverage_dir, binary);
+    if let Some(pe) = path_equiv {
+        mounts.push(Mount {
+            host_path: pe.host_source_dir.clone(),
+            read_only: true,
+        });
+    }
+    match runner.command("llvm-cov", &tool_args, &mounts).output() {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        Ok(o) => format!(
-            "llvm-cov report failed:\n{}",
-            String::from_utf8_lossy(&o.stderr)
-        ),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if let Some(img) = runner.image_name() {
+                if is_tool_not_found(&o.status, &stderr) {
+                    return tool_not_found_error("llvm-cov", img);
+                }
+            }
+            format!("llvm-cov report failed:\n{stderr}")
+        }
         Err(e) => format!("llvm-cov not available: {e}"),
     }
 }
@@ -234,12 +426,11 @@ fn run_show(
     profdata: &Path,
     binary: &Path,
     source_file: Option<&Path>,
-    llvm_bin_dir: Option<&Path>,
-    path_equiv: Option<&str>,
+    runner: &CoverageRunner,
+    path_equiv: Option<&PathEquivalence>,
+    coverage_dir: &Path,
 ) -> Result<String, String> {
-    let exe = llvm_tool("llvm-cov", llvm_bin_dir);
-
-    let mut args: Vec<String> = vec![
+    let mut tool_args: Vec<String> = vec![
         "show".into(),
         "-instr-profile".into(),
         profdata.to_string_lossy().into_owned(),
@@ -249,17 +440,30 @@ fn run_show(
         "-use-color=false".into(),
     ];
     if let Some(pe) = path_equiv {
-        args.push(pe.to_string());
+        tool_args.push(pe.flag.clone());
     }
 
-    debug!("llvm-cov show command: {} {}", exe, args.join(" "));
+    let mut mounts = coverage_mounts(coverage_dir, binary);
+    if let Some(pe) = path_equiv {
+        mounts.push(Mount {
+            host_path: pe.host_source_dir.clone(),
+            read_only: true,
+        });
+    }
 
-    let output = Command::new(&exe)
-        .args(&args)
+    debug!("llvm-cov show tool_args: {:?}", tool_args);
+
+    let output = runner
+        .command("llvm-cov", &tool_args, &mounts)
         .output()
         .map_err(|e| format!("llvm-cov not available: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        if let Some(img) = runner.image_name() {
+            if is_tool_not_found(&output.status, &stderr) {
+                return Err(tool_not_found_error("llvm-cov", img));
+            }
+        }
         return Err(format!("llvm-cov show failed:\n{stderr}"));
     }
 
@@ -363,22 +567,28 @@ pub fn analyze_coverage(
     binary_path: &Path,
     sha: &Sha,
     profraw_path: Option<&Path>,
-    llvm_bin_dir: Option<&Path>,
+    runner: &CoverageRunner,
 ) -> String {
     let (profdata, binary) = match resolve_profdata_and_binary(
         coverage_dir,
         binary_path,
         sha,
         profraw_path,
-        llvm_bin_dir,
+        runner,
     ) {
         Ok(x) => x,
         Err(e) => return e,
     };
 
-    let embedded = embedded_source_paths(&profdata, &binary, llvm_bin_dir);
+    let embedded = embedded_source_paths(&profdata, &binary, runner, coverage_dir);
     let path_equiv = detect_path_equivalence(&embedded, binary_path);
-    let report = run_report(&profdata, &binary, llvm_bin_dir, path_equiv.as_deref());
+    let report = run_report(
+        &profdata,
+        &binary,
+        runner,
+        path_equiv.as_ref(),
+        coverage_dir,
+    );
 
     let mut result = format!("Coverage Analysis for: {}\n", binary_path.display());
     result.push_str(&format!("Coverage Directory: {}\n", coverage_dir.display()));
@@ -398,28 +608,29 @@ pub fn get_file_coverage(
     sha: &Sha,
     profraw_path: Option<&Path>,
     file_path: Option<&Path>,
-    llvm_bin_dir: Option<&Path>,
+    runner: &CoverageRunner,
 ) -> String {
     let (profdata, binary) = match resolve_profdata_and_binary(
         coverage_dir,
         binary_path,
         sha,
         profraw_path,
-        llvm_bin_dir,
+        runner,
     ) {
         Ok(x) => x,
         Err(e) => return e,
     };
 
-    let embedded = embedded_source_paths(&profdata, &binary, llvm_bin_dir);
+    let embedded = embedded_source_paths(&profdata, &binary, runner, coverage_dir);
     let path_equiv = detect_path_equivalence(&embedded, binary_path);
 
     match run_show(
         &profdata,
         &binary,
         file_path,
-        llvm_bin_dir,
-        path_equiv.as_deref(),
+        runner,
+        path_equiv.as_ref(),
+        coverage_dir,
     ) {
         Ok(s) if !s.trim().is_empty() => s,
         Ok(_) => {
@@ -429,5 +640,145 @@ pub fn get_file_coverage(
             "llvm-cov show produced no output for this file.".to_string()
         }
         Err(e) => e,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    #[test]
+    fn build_container_args_basic() {
+        let mounts = vec![
+            Mount {
+                host_path: PathBuf::from("/data/coverage"),
+                read_only: false,
+            },
+            Mount {
+                host_path: PathBuf::from("/data/bin"),
+                read_only: true,
+            },
+        ];
+        let tool_args: Vec<String> = vec![
+            "merge".into(),
+            "-sparse".into(),
+            "/data/coverage/abc123.profraw".into(),
+        ];
+        let args = build_container_args(
+            "fuzzing-image:latest",
+            &[],
+            "llvm-profdata",
+            &tool_args,
+            &mounts,
+        );
+
+        assert!(args.contains(&"run".to_string()));
+        assert!(args.contains(&"--rm".to_string()));
+        assert!(args.contains(&"--network=none".to_string()));
+
+        let image_pos = args.iter().position(|a| a == "fuzzing-image:latest").unwrap();
+        let tool_pos = args.iter().position(|a| a == "llvm-profdata").unwrap();
+        assert!(
+            image_pos < tool_pos,
+            "image must appear before tool name"
+        );
+
+        assert!(args.contains(&"-v".to_string()));
+        assert!(args.contains(&"/data/coverage:/data/coverage".to_string()));
+        assert!(args.contains(&"/data/bin:/data/bin:ro".to_string()));
+    }
+
+    #[test]
+    fn build_container_args_with_options() {
+        let args = build_container_args(
+            "my-image:v1",
+            &["--platform=linux/amd64".to_string()],
+            "llvm-cov",
+            &["report".into()],
+            &[],
+        );
+
+        let opt_pos = args
+            .iter()
+            .position(|a| a == "--platform=linux/amd64")
+            .unwrap();
+        let image_pos = args.iter().position(|a| a == "my-image:v1").unwrap();
+        assert!(
+            opt_pos < image_pos,
+            "container_options must appear before image"
+        );
+    }
+
+    #[test]
+    fn build_container_args_no_mount_when_empty() {
+        let args = build_container_args("img:latest", &[], "llvm-cov", &["show".into()], &[]);
+        assert!(!args.contains(&"-v".to_string()));
+    }
+
+    #[test]
+    fn is_tool_not_found_exit_127() {
+        let status = ExitStatus::from_raw(127 << 8);
+        assert!(is_tool_not_found(&status, ""));
+    }
+
+    #[test]
+    fn is_tool_not_found_stderr_pattern() {
+        let status = ExitStatus::from_raw(1 << 8);
+        assert!(is_tool_not_found(
+            &status,
+            "OCI runtime exec failed: executable file not found in $PATH"
+        ));
+        assert!(is_tool_not_found(
+            &status,
+            "llvm-profdata: No such file or directory"
+        ));
+    }
+
+    #[test]
+    fn is_tool_not_found_normal_failure() {
+        let status = ExitStatus::from_raw(1 << 8);
+        assert!(!is_tool_not_found(&status, "merge failed: corrupted data"));
+    }
+
+    #[test]
+    fn tool_not_found_error_contains_image() {
+        let msg = tool_not_found_error("llvm-profdata", "my-image:v2");
+        assert!(msg.contains("my-image:v2"));
+        assert!(msg.contains("llvm-profdata"));
+        assert!(msg.contains("ubuntu-llvm.Dockerfile"));
+    }
+
+    #[test]
+    fn llvm_tool_container_with_dir() {
+        let result = llvm_tool_container("llvm-cov", Some(Path::new("/usr/lib/llvm-18/bin")));
+        assert_eq!(result, "/usr/lib/llvm-18/bin/llvm-cov");
+    }
+
+    #[test]
+    fn llvm_tool_container_without_dir() {
+        let result = llvm_tool_container("llvm-cov", None);
+        assert_eq!(result, "llvm-cov");
+    }
+
+    #[test]
+    fn coverage_mounts_binary_inside_coverage_dir() {
+        let coverage_dir = Path::new("/data/coverage/fuzzer1");
+        let binary = Path::new("/data/coverage/fuzzer1/fuzzer_abc.bin");
+        let mounts = coverage_mounts(coverage_dir, binary);
+        assert_eq!(mounts.len(), 1, "no extra mount when binary is inside coverage_dir");
+        assert_eq!(mounts[0].host_path, PathBuf::from("/data/coverage/fuzzer1"));
+        assert!(!mounts[0].read_only);
+    }
+
+    #[test]
+    fn coverage_mounts_binary_outside_coverage_dir() {
+        let coverage_dir = Path::new("/data/coverage/fuzzer1");
+        let binary = Path::new("/opt/targets/fuzzer1");
+        let mounts = coverage_mounts(coverage_dir, binary);
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[1].host_path, PathBuf::from("/opt/targets"));
+        assert!(mounts[1].read_only);
     }
 }

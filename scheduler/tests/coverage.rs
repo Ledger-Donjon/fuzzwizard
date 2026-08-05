@@ -155,3 +155,45 @@ fn test_collect_coverage_with_container() {
     // Should handle container case gracefully even if container_binary is None
     scheduler.collect_coverage();
 }
+
+#[test]
+fn test_get_task_coverage_container_no_binary_returns_error() {
+    let temp_dir = assert_fs::TempDir::new().unwrap();
+    let test_file = temp_dir.child("test_binary");
+    test_file.write_binary(b"test binary content").unwrap();
+
+    let content = fs::read(test_file.path()).unwrap();
+    let sha: Sha = Sha3_256::digest(&content).into();
+
+    let collector = MockCollector {
+        targets: HashMap::new(),
+    };
+
+    let config = SchedulerConfig {
+        scheduler_name: "test_cov_container_no_bin".to_string(),
+        targets_directory: vec![],
+        build_script: "".to_string(),
+        build_script_interval_hours: None,
+        backend_url: "http://127.0.0.1:0".to_string(),
+        corpus_directory: temp_dir.path().join("corpus").to_string_lossy().into(),
+        crashes_directory: temp_dir.path().join("crashes").to_string_lossy().into(),
+        coverage_directory: temp_dir.path().join("coverage").to_string_lossy().into(),
+        container_image: Some("test-image:latest".to_string()),
+        container_options: None,
+        has_coverage: true,
+        llvm_bin_directory: None,
+        state_file: None,
+    };
+
+    let scheduler = Scheduler::new(collector, config, None);
+
+    let result = scheduler.get_task_coverage(&sha);
+    assert!(
+        result.contains("container_binary"),
+        "expected error about missing container_binary, got: {result}"
+    );
+    assert!(
+        result.contains("test-image:latest"),
+        "error should mention the configured image, got: {result}"
+    );
+}

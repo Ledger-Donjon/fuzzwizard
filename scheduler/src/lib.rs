@@ -1307,6 +1307,7 @@ impl<C: TargetsCollector> Scheduler<C> {
         fs::set_permissions(&fuzzer_coveragedir, perms)?;
         let mut child: Child;
         let mut task_container_name: Option<String> = None;
+        let sha_hex = hex::encode(fuzzer_hash);
 
         if let Some(ref container_image) = self.container_image {
             if let Some(ref binary) = self.container_binary {
@@ -1331,9 +1332,8 @@ impl<C: TargetsCollector> Scheduler<C> {
                     // Writable /tmp inside the container for fuzzer scratch space
                     "--tmpfs".into(),
                     "/tmp:rw,noexec,nosuid,size=256m".into(),
-                    // Set up environment variable for coverage outputs in the container
                     "-e".into(),
-                    "LLVM_PROFILE_FILE=/fuzzer/coverage/%p.profraw".into(),
+                    format!("LLVM_PROFILE_FILE=/fuzzer/coverage/{sha_hex}.profraw"),
                     "-v".into(),
                     format!("{}:/fuzzer/binary:ro", fuzzer_path.display()),
                     "-v".into(),
@@ -1397,12 +1397,11 @@ impl<C: TargetsCollector> Scheduler<C> {
                 format!("-artifact_prefix={}{}", fuzzer_crashdir.display(), "/"),
             ];
 
-            // Add coverage file output option if coverage is enabled
             if self.has_coverage {
                 args.push(format!(
-                    "-LLVM_PROFILE_FILE={}/{}",
+                    "-LLVM_PROFILE_FILE={}/{}.profraw",
                     fuzzer_coveragedir.display(),
-                    "%p.profraw",
+                    sha_hex,
                 ));
             }
 
@@ -1421,11 +1420,10 @@ impl<C: TargetsCollector> Scheduler<C> {
                 }
             }
 
-            // Always set coverage environment variable if coverage is enabled
             if self.has_coverage {
                 cmd.env(
                     "LLVM_PROFILE_FILE",
-                    format!("{}/{}", fuzzer_coveragedir.display(), "%p.profraw",),
+                    format!("{}/{}.profraw", fuzzer_coveragedir.display(), sha_hex),
                 );
             }
 
@@ -1448,7 +1446,7 @@ impl<C: TargetsCollector> Scheduler<C> {
         // This allows later coverage processing by retaining the tested binary.
 
         // Compose path for the binary destination inside the coverage directory
-        let coverage_bin_name = format!("fuzzer_{}.bin", hex::encode(fuzzer_hash));
+        let coverage_bin_name = format!("fuzzer_{sha_hex}.bin");
         let coverage_bin_path = fuzzer_coveragedir.join(&coverage_bin_name);
         // Copy the binary to the coverage directory
         // If an error occurs, log it but don't fail the task startup
@@ -1460,12 +1458,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             );
         }
         let profraw_path = if self.has_coverage {
-            let pid = if task_container_name.is_some() {
-                1
-            } else {
-                child.id()
-            };
-            Some(fuzzer_coveragedir.join(format!("{pid}.profraw")))
+            Some(fuzzer_coveragedir.join(format!("{sha_hex}.profraw")))
         } else {
             None
         };
@@ -1848,6 +1841,28 @@ impl<C: TargetsCollector> Scheduler<C> {
         }
     }
 
+    /// Build the appropriate [`coverage::CoverageRunner`] for this scheduler.
+    ///
+    /// When a `container_image` is configured the LLVM tools are executed
+    /// inside an ephemeral container so that the LLVM version matches the one
+    /// that produced the `.profraw` files.
+    fn coverage_runner(&self) -> std::result::Result<coverage::CoverageRunner, String> {
+        match (&self.container_image, &self.container_binary) {
+            (Some(image), Some(bin)) => Ok(coverage::CoverageRunner::Container {
+                binary: bin.clone(),
+                image: image.clone(),
+                options: self.container_options.clone().unwrap_or_default(),
+                llvm_bin_dir: self.llvm_bin_directory.clone(),
+            }),
+            (Some(image), None) => Err(format!(
+                "Coverage: container image '{image}' configured but no container_binary set in config.json"
+            )),
+            (None, _) => Ok(coverage::CoverageRunner::Host {
+                llvm_bin_dir: self.llvm_bin_directory.clone(),
+            }),
+        }
+    }
+
     /// Get coverage analysis for a specific task by SHA
     ///
     /// # Arguments
@@ -1858,12 +1873,15 @@ impl<C: TargetsCollector> Scheduler<C> {
     ///
     /// A string containing the coverage analysis report, or an error message
     pub fn get_task_coverage(&self, sha: &Sha) -> String {
-        // Check if coverage is enabled
         if !self.has_coverage {
             return "Coverage is not enabled for this scheduler".to_string();
         }
 
-        // Find the task
+        let runner = match self.coverage_runner() {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
         let task = match self.tasks.get(sha) {
             Some(t) => t,
             None => {
@@ -1871,14 +1889,12 @@ impl<C: TargetsCollector> Scheduler<C> {
             }
         };
 
-        // Get fuzzer name from task path
         let fuzzer_name = task
             .path
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
 
-        // Build coverage directory path
         let coverage_dir = self.coverage_directory.join(fuzzer_name);
 
         coverage::analyze_coverage(
@@ -1886,7 +1902,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             &task.path,
             sha,
             task.profraw_path.as_deref(),
-            self.llvm_bin_directory.as_deref(),
+            &runner,
         )
     }
 
@@ -1899,6 +1915,11 @@ impl<C: TargetsCollector> Scheduler<C> {
         if !self.has_coverage {
             return "Coverage is not enabled for this scheduler".to_string();
         }
+
+        let runner = match self.coverage_runner() {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
 
         let task = match self.tasks.get(sha) {
             Some(t) => t,
@@ -1918,7 +1939,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             sha,
             task.profraw_path.as_deref(),
             file_path,
-            self.llvm_bin_directory.as_deref(),
+            &runner,
         )
     }
 }
