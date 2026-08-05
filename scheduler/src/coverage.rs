@@ -16,9 +16,7 @@ use crate::Sha;
 /// matches the one that produced the `.profraw` / coverage-mapped binary.
 pub enum CoverageRunner {
     /// Run LLVM tools directly on the host.
-    Host {
-        llvm_bin_dir: Option<PathBuf>,
-    },
+    Host { llvm_bin_dir: Option<PathBuf> },
     /// Run LLVM tools inside an ephemeral container (`run --rm`).
     Container {
         binary: PathBuf,
@@ -59,7 +57,13 @@ fn build_container_args(
         "/tmp:rw,noexec,nosuid,size=256m".into(),
     ];
 
+    // Container runtimes reject the same mount point twice, and several
+    // mount sources (coverage dir, binary dir, source trees) can coincide.
+    let mut seen = HashSet::new();
     for m in mounts {
+        if !seen.insert(m.host_path.clone()) {
+            continue;
+        }
         args.push("-v".into());
         let host = m.host_path.to_string_lossy();
         if m.read_only {
@@ -98,8 +102,7 @@ fn is_tool_not_found(status: &std::process::ExitStatus, stderr: &str) -> bool {
         return true;
     }
     let lower = stderr.to_lowercase();
-    lower.contains("executable file not found")
-        || lower.contains("no such file or directory")
+    lower.contains("executable file not found") || lower.contains("no such file or directory")
 }
 
 impl CoverageRunner {
@@ -229,12 +232,10 @@ fn resolve_profdata_and_binary(
     Ok((profdata, binary))
 }
 
-/// Extract `"filename":"…"` values from `llvm-cov export --summary-only` JSON output.
-fn parse_filenames_from_export(json: &str) -> Vec<String> {
+/// Extract `"filename":"…"` values from `llvm-cov export` JSON output.
+fn parse_filenames_from_export(json: &serde_json::Value) -> Vec<String> {
     let mut result = HashSet::new();
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(json) {
-        collect_filenames(&v, &mut result);
-    }
+    collect_filenames(json, &mut result);
     result.into_iter().collect()
 }
 
@@ -259,20 +260,27 @@ fn collect_filenames(v: &serde_json::Value, out: &mut HashSet<String>) {
     }
 }
 
-/// Extract source file paths embedded in the binary via `llvm-cov export --summary-only`.
-fn embedded_source_paths(
+/// Run `llvm-cov export` and parse its JSON output.
+///
+/// `summary_only` keeps the payload small when only file names and totals are
+/// needed; the full export additionally carries per-function regions, which is
+/// what lets us report coverage when the sources themselves are unavailable.
+fn export_json(
     profdata: &Path,
     binary: &Path,
     runner: &CoverageRunner,
     coverage_dir: &Path,
-) -> Vec<String> {
-    let tool_args = vec![
-        "export".into(),
-        "--summary-only".into(),
+    summary_only: bool,
+) -> Option<serde_json::Value> {
+    let mut tool_args: Vec<String> = vec!["export".into()];
+    if summary_only {
+        tool_args.push("--summary-only".into());
+    }
+    tool_args.extend([
         "-instr-profile".into(),
         profdata.to_string_lossy().into_owned(),
         binary.to_string_lossy().into_owned(),
-    ];
+    ]);
     let mounts = coverage_mounts(coverage_dir, binary);
     let output = match runner.command("llvm-cov", &tool_args, &mounts).output() {
         Ok(o) if o.status.success() => o,
@@ -281,16 +289,34 @@ fn embedded_source_paths(
                 "llvm-cov export failed: {}",
                 String::from_utf8_lossy(&o.stderr)
             );
-            return Vec::new();
+            return None;
         }
         Err(e) => {
             debug!("llvm-cov export not available: {e}");
-            return Vec::new();
+            return None;
         }
     };
 
-    let raw = String::from_utf8_lossy(&output.stdout);
-    let result = parse_filenames_from_export(&raw);
+    match serde_json::from_slice(&output.stdout) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            debug!("llvm-cov export produced invalid JSON: {e}");
+            None
+        }
+    }
+}
+
+/// Extract source file paths embedded in the binary via `llvm-cov export --summary-only`.
+fn embedded_source_paths(
+    profdata: &Path,
+    binary: &Path,
+    runner: &CoverageRunner,
+    coverage_dir: &Path,
+) -> Vec<String> {
+    let Some(json) = export_json(profdata, binary, runner, coverage_dir, true) else {
+        return Vec::new();
+    };
+    let result = parse_filenames_from_export(&json);
     debug!(
         "llvm-cov export found {} filenames: {:?}",
         result.len(),
@@ -299,24 +325,57 @@ fn embedded_source_paths(
     result
 }
 
-/// Result of path-equivalence detection: the flag for llvm-cov plus the host
-/// directory that should be mounted read-only for source-level commands.
+/// Where the sources referenced by the coverage mapping live on the host.
 #[derive(Debug)]
-struct PathEquivalence {
-    flag: String,
-    host_source_dir: PathBuf,
+struct SourceLocation {
+    /// `-path-equivalence=FROM,TO` flag, needed only when the on-disk location
+    /// differs from the path recorded in the binary.
+    flag: Option<String>,
+    /// Host directories to bind-mount read-only so containerised `llvm-cov`
+    /// can read the sources.
+    mounts: Vec<PathBuf>,
 }
 
-/// Detect container/host path mismatch and return a `-path-equivalence=FROM,TO` flag if needed.
+/// Upper bound on source directories bind-mounted into a coverage container.
+const MAX_SOURCE_MOUNTS: usize = 16;
+
+/// Drop directories already covered by another entry so nested source trees
+/// collapse into a single mount.
+fn dedup_ancestors(mut dirs: Vec<PathBuf>) -> Vec<PathBuf> {
+    dirs.sort();
+    dirs.dedup();
+    let mut kept: Vec<PathBuf> = Vec::new();
+    for dir in dirs {
+        if kept.iter().any(|k| dir.starts_with(k)) {
+            continue;
+        }
+        kept.push(dir);
+    }
+    kept
+}
+
+/// Locate on the host the sources referenced by the coverage mapping.
 ///
-/// Walks up from `host_binary_path` looking for an embedded source file on disk to derive
-/// the mapping between container and host paths.
-fn detect_path_equivalence(
-    embedded_paths: &[String],
-    host_binary_path: &Path,
-) -> Option<PathEquivalence> {
+/// Two situations are handled. Either the sources sit at exactly the path
+/// recorded in the binary — no `-path-equivalence` is needed, but a bind-mount
+/// still is for container runs — or the tree was moved, in which case we walk
+/// up from `host_binary_path` to derive a recorded→host mapping.
+fn locate_sources(embedded_paths: &[String], host_binary_path: &Path) -> Option<SourceLocation> {
     if embedded_paths.is_empty() {
         return None;
+    }
+
+    let present: Vec<PathBuf> = embedded_paths
+        .iter()
+        .map(Path::new)
+        .filter(|p| p.is_file())
+        .filter_map(|p| p.parent().map(Path::to_path_buf))
+        .collect();
+    if !present.is_empty() {
+        let mut mounts = dedup_ancestors(present);
+        mounts.truncate(MAX_SOURCE_MOUNTS);
+        info!("Sources found at their recorded paths, mounting {mounts:?}");
+        return Some(SourceLocation { flag: None, mounts });
     }
 
     let start_dir = if host_binary_path.is_dir() {
@@ -335,23 +394,24 @@ fn detect_path_equivalence(
 
         let mut candidate = Some(start_dir.as_path());
         while let Some(dir) = candidate {
-            if dir == emb_dir {
-                return None;
-            }
             if dir.join(emb_name).is_file() {
                 let host_str = dir.to_string_lossy();
                 let emb_str = emb_dir.to_string_lossy();
                 let flag = format!("-path-equivalence={emb_str},{host_str}");
                 info!("Path equivalence detected: {flag}");
-                return Some(PathEquivalence {
-                    flag,
-                    host_source_dir: dir.to_path_buf(),
+                return Some(SourceLocation {
+                    flag: Some(flag),
+                    mounts: vec![dir.to_path_buf()],
                 });
             }
             candidate = dir.parent();
         }
     }
 
+    warn!(
+        "No source tree found on host for {} embedded paths",
+        embedded_paths.len()
+    );
     None
 }
 
@@ -373,12 +433,30 @@ fn coverage_mounts(coverage_dir: &Path, binary: &Path) -> Vec<Mount> {
     mounts
 }
 
+/// Append the `-path-equivalence` flag required by `source_loc`, if any.
+fn push_source_flag(tool_args: &mut Vec<String>, source_loc: Option<&SourceLocation>) {
+    if let Some(flag) = source_loc.and_then(|loc| loc.flag.as_ref()) {
+        tool_args.push(flag.clone());
+    }
+}
+
+/// Append the read-only source-tree mounts required by `source_loc`, if any.
+fn push_source_mounts(mounts: &mut Vec<Mount>, source_loc: Option<&SourceLocation>) {
+    let Some(loc) = source_loc else { return };
+    for dir in &loc.mounts {
+        mounts.push(Mount {
+            host_path: dir.clone(),
+            read_only: true,
+        });
+    }
+}
+
 /// Run `llvm-cov report` and return the text output.
 fn run_report(
     profdata: &Path,
     binary: &Path,
     runner: &CoverageRunner,
-    path_equiv: Option<&PathEquivalence>,
+    source_loc: Option<&SourceLocation>,
     coverage_dir: &Path,
 ) -> String {
     let mut tool_args: Vec<String> = vec![
@@ -388,16 +466,9 @@ fn run_report(
         profdata.to_string_lossy().into_owned(),
         "-use-color=false".into(),
     ];
-    if let Some(pe) = path_equiv {
-        tool_args.push(pe.flag.clone());
-    }
+    push_source_flag(&mut tool_args, source_loc);
     let mut mounts = coverage_mounts(coverage_dir, binary);
-    if let Some(pe) = path_equiv {
-        mounts.push(Mount {
-            host_path: pe.host_source_dir.clone(),
-            read_only: true,
-        });
-    }
+    push_source_mounts(&mut mounts, source_loc);
     match runner.command("llvm-cov", &tool_args, &mounts).output() {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
         Ok(o) => {
@@ -411,6 +482,46 @@ fn run_report(
         }
         Err(e) => format!("llvm-cov not available: {e}"),
     }
+}
+
+/// Outcome of a successful `llvm-cov show` invocation.
+enum ShowOutcome {
+    /// Annotated source text for the requested file (or all files).
+    Annotated(String),
+    /// No annotated source could be produced. Carries the source paths that
+    /// `llvm-cov` explicitly reported as unreadable, which may be empty when
+    /// the file is simply absent from the output.
+    NoSource(Vec<String>),
+}
+
+/// Extract from `llvm-cov` stderr the source paths it could not read.
+///
+/// `llvm-cov show` exits with status 0 when a source file is missing: it only
+/// writes `error: <path>: No such file or directory` followed by
+/// `warning: The file '<path>' isn't covered.` and skips the file. Without
+/// parsing stderr the caller cannot tell "no coverage" from "no sources".
+fn parse_unreadable_sources(stderr: &str) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    for line in stderr.lines() {
+        let line = line.trim();
+        let found = if let Some(rest) = line.strip_prefix("warning: The file '") {
+            rest.strip_suffix("' isn't covered.").map(str::to_string)
+        } else if let Some(rest) = line.strip_prefix("error: ") {
+            rest.rsplit_once(": ").and_then(|(path, message)| {
+                let m = message.to_lowercase();
+                (m.contains("no such file") || m.contains("permission denied"))
+                    .then(|| path.to_string())
+            })
+        } else {
+            None
+        };
+        if let Some(path) = found {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths
 }
 
 /// Run `llvm-cov show` and return annotated source.
@@ -427,9 +538,9 @@ fn run_show(
     binary: &Path,
     source_file: Option<&Path>,
     runner: &CoverageRunner,
-    path_equiv: Option<&PathEquivalence>,
+    source_loc: Option<&SourceLocation>,
     coverage_dir: &Path,
-) -> Result<String, String> {
+) -> Result<ShowOutcome, String> {
     let mut tool_args: Vec<String> = vec![
         "show".into(),
         "-instr-profile".into(),
@@ -439,17 +550,10 @@ fn run_show(
         "-show-line-counts-or-regions".into(),
         "-use-color=false".into(),
     ];
-    if let Some(pe) = path_equiv {
-        tool_args.push(pe.flag.clone());
-    }
+    push_source_flag(&mut tool_args, source_loc);
 
     let mut mounts = coverage_mounts(coverage_dir, binary);
-    if let Some(pe) = path_equiv {
-        mounts.push(Mount {
-            host_path: pe.host_source_dir.clone(),
-            read_only: true,
-        });
-    }
+    push_source_mounts(&mut mounts, source_loc);
 
     debug!("llvm-cov show tool_args: {:?}", tool_args);
 
@@ -467,14 +571,22 @@ fn run_show(
         return Err(format!("llvm-cov show failed:\n{stderr}"));
     }
 
+    let unreadable = parse_unreadable_sources(&String::from_utf8_lossy(&output.stderr));
+    if !unreadable.is_empty() {
+        debug!(
+            "llvm-cov could not read {} source file(s)",
+            unreadable.len()
+        );
+    }
+
     let full_output = String::from_utf8_lossy(&output.stdout).to_string();
     if full_output.trim().is_empty() {
-        return Ok(String::new());
+        return Ok(ShowOutcome::NoSource(unreadable));
     }
 
     let source_file = match source_file {
         Some(sf) => sf,
-        None => return Ok(full_output),
+        None => return Ok(ShowOutcome::Annotated(full_output)),
     };
 
     let file_name = source_file
@@ -490,9 +602,10 @@ fn run_show(
         full_output.len()
     );
 
-    extract_file_section(&full_output, &source_str, file_name)
-        .map(Ok)
-        .unwrap_or(Ok(String::new()))
+    match extract_file_section(&full_output, &source_str, file_name) {
+        Some(section) => Ok(ShowOutcome::Annotated(section)),
+        None => Ok(ShowOutcome::NoSource(unreadable)),
+    }
 }
 
 /// Extract the annotated-source section for a single file from `llvm-cov show` text output.
@@ -561,6 +674,321 @@ fn extract_file_section(full_output: &str, source_path: &str, basename: &str) ->
     Some(section)
 }
 
+/// First line of the coverage view rendered when `llvm-cov` cannot read the
+/// sources and only region-level data can be shown.
+///
+/// The TUI keys off this marker to style the panel as a degraded view.
+pub const COVERAGE_SOURCE_UNAVAILABLE_MARKER: &str = "SOURCE NOT AVAILABLE";
+
+/// `kind` value identifying an ordinary code region in `llvm-cov export` output.
+const REGION_KIND_CODE: u64 = 0;
+
+/// A code region from `llvm-cov export`, whose JSON encoding is the array
+/// `[lineStart, colStart, lineEnd, colEnd, count, fileID, expandedFileID, kind]`.
+struct Region {
+    line_start: u64,
+    line_end: u64,
+    count: u64,
+}
+
+/// Per-function coverage extracted from `llvm-cov export`.
+struct FunctionCoverage {
+    name: String,
+    count: u64,
+    regions: Vec<Region>,
+}
+
+impl FunctionCoverage {
+    fn line_span(&self) -> Option<(u64, u64)> {
+        let start = self.regions.iter().map(|r| r.line_start).min()?;
+        let end = self.regions.iter().map(|r| r.line_end).max()?;
+        Some((start, end))
+    }
+
+    fn covered_regions(&self) -> usize {
+        self.regions.iter().filter(|r| r.count > 0).count()
+    }
+}
+
+/// Compare two source paths, falling back to a basename match so that
+/// container/host path differences still line up.
+fn same_source_file(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    fn base(p: &str) -> Option<&str> {
+        Path::new(p).file_name().and_then(|n| n.to_str())
+    }
+    match (base(a), base(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
+fn parse_region(v: &serde_json::Value) -> Option<Region> {
+    let a = v.as_array()?;
+    let num = |i: usize| a.get(i).and_then(serde_json::Value::as_u64);
+    if num(7).unwrap_or(REGION_KIND_CODE) != REGION_KIND_CODE {
+        return None;
+    }
+    Some(Region {
+        line_start: num(0)?,
+        line_end: num(2)?,
+        count: num(4)?,
+    })
+}
+
+/// Collect per-function coverage from `llvm-cov export` JSON, restricted to
+/// `file` when given, ordered by position in the source.
+fn parse_functions(json: &serde_json::Value, file: Option<&str>) -> Vec<FunctionCoverage> {
+    let mut out: Vec<FunctionCoverage> = Vec::new();
+    let Some(data) = json.get("data").and_then(|d| d.as_array()) else {
+        return out;
+    };
+
+    for entry in data {
+        let Some(functions) = entry.get("functions").and_then(|f| f.as_array()) else {
+            continue;
+        };
+        for f in functions {
+            if let Some(target) = file {
+                let belongs = f
+                    .get("filenames")
+                    .and_then(|n| n.as_array())
+                    .is_some_and(|names| {
+                        names
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .any(|n| same_source_file(n, target))
+                    });
+                if !belongs {
+                    continue;
+                }
+            }
+            let regions = f
+                .get("regions")
+                .and_then(|r| r.as_array())
+                .map(|r| r.iter().filter_map(parse_region).collect::<Vec<_>>())
+                .unwrap_or_default();
+            if regions.is_empty() {
+                continue;
+            }
+            out.push(FunctionCoverage {
+                name: f
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("<unknown>")
+                    .to_string(),
+                count: f
+                    .get("count")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                regions,
+            });
+        }
+    }
+
+    out.sort_by_key(|f| f.line_span().map(|(start, _)| start).unwrap_or(0));
+    out
+}
+
+/// Merge overlapping or adjacent `(start, end)` line ranges.
+fn merge_ranges(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+    ranges.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for (start, end) in ranges {
+        match merged.last_mut() {
+            Some(last) if start <= last.1.saturating_add(1) => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
+}
+
+fn format_range((start, end): (u64, u64)) -> String {
+    if start == end {
+        start.to_string()
+    } else {
+        format!("{start}-{end}")
+    }
+}
+
+/// Shorten an over-long symbol name so the function table stays aligned.
+fn truncate_name(name: &str, max: usize) -> String {
+    if name.chars().count() <= max {
+        return name.to_string();
+    }
+    let head: String = name.chars().take(max.saturating_sub(3)).collect();
+    format!("{head}...")
+}
+
+/// Render the `Lines`/`Functions`/`Regions` totals of a file, if the export
+/// carries a summary block for it.
+fn render_file_summary(json: &serde_json::Value, file: &str) -> Option<String> {
+    let files = json
+        .get("data")
+        .and_then(|d| d.as_array())?
+        .iter()
+        .filter_map(|e| e.get("files").and_then(|f| f.as_array()))
+        .flatten();
+    let summary = files
+        .filter(|f| {
+            f.get("filename")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|n| same_source_file(n, file))
+        })
+        .find_map(|f| f.get("summary"))?;
+
+    let mut out = String::new();
+    for key in ["lines", "functions", "regions", "branches"] {
+        let Some(stat) = summary.get(key) else {
+            continue;
+        };
+        let covered = stat.get("covered").and_then(serde_json::Value::as_u64);
+        let count = stat.get("count").and_then(serde_json::Value::as_u64);
+        let percent = stat.get("percent").and_then(serde_json::Value::as_f64);
+        if let (Some(covered), Some(count), Some(percent)) = (covered, count, percent) {
+            let label = format!("{}{}", key[..1].to_uppercase(), &key[1..]);
+            out.push_str(&format!(
+                "  {label:<10} {covered:>8} / {count:<8} ({percent:.2}%)\n"
+            ));
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// Render the per-function table and the uncovered line ranges.
+fn render_functions(functions: &[FunctionCoverage]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "\nFUNCTIONS ({} total, {} executed)\n\n",
+        functions.len(),
+        functions.iter().filter(|f| f.count > 0).count()
+    ));
+    out.push_str(&format!(
+        "  {:>12}  {:>13}  {:>9}  {}\n",
+        "EXECUTIONS", "LINES", "REGIONS", "NAME"
+    ));
+    for f in functions {
+        let lines = f.line_span().map(format_range).unwrap_or_default();
+        let regions = format!("{}/{}", f.covered_regions(), f.regions.len());
+        out.push_str(&format!(
+            "  {:>12}  {:>13}  {:>9}  {}\n",
+            f.count,
+            lines,
+            regions,
+            truncate_name(&f.name, 80)
+        ));
+    }
+
+    let uncovered = merge_ranges(
+        functions
+            .iter()
+            .flat_map(|f| f.regions.iter())
+            .filter(|r| r.count == 0)
+            .map(|r| (r.line_start, r.line_end))
+            .collect(),
+    );
+    if !uncovered.is_empty() {
+        let plural = if uncovered.len() == 1 {
+            "range"
+        } else {
+            "ranges"
+        };
+        out.push_str(&format!(
+            "\nUNCOVERED LINES ({} {plural})\n\n",
+            uncovered.len()
+        ));
+        let rendered: Vec<String> = uncovered.into_iter().map(format_range).collect();
+        for chunk in rendered.chunks(8) {
+            out.push_str(&format!("  {}\n", chunk.join(", ")));
+        }
+    }
+
+    out
+}
+
+/// Build the view shown when `llvm-cov` cannot read the sources.
+///
+/// `llvm-cov report` and `llvm-cov export` only need the coverage mapping, so
+/// region-level data remains available even with no source tree on disk; we
+/// show that rather than an empty panel.
+fn render_missing_source_view(
+    requested: Option<&Path>,
+    export: Option<&serde_json::Value>,
+) -> String {
+    let mut out = format!("{COVERAGE_SOURCE_UNAVAILABLE_MARKER}\n\n");
+
+    let requested_str = requested.map(|p| p.to_string_lossy().into_owned());
+    match &requested_str {
+        Some(path) => out.push_str(&format!(
+            "llvm-cov could not read the source file recorded in the binary:\n  {path}\n"
+        )),
+        None => out
+            .push_str("llvm-cov could not read any of the source files recorded in the binary.\n"),
+    }
+    out.push_str("\nRegion-level coverage from the profile data is shown below.\n");
+
+    let Some(json) = export else {
+        out.push_str("\nNo region data available: llvm-cov export produced no usable output.\n");
+        return out;
+    };
+
+    match &requested_str {
+        Some(path) => out.push_str(&render_file_section(json, path, false)),
+        None => {
+            let files = export_file_names(json);
+            if files.is_empty() {
+                out.push_str("\nNo region data available in the coverage mapping.\n");
+            }
+            for file in files {
+                out.push_str(&render_file_section(json, &file, true));
+            }
+        }
+    }
+
+    out
+}
+
+/// File names carried by an `llvm-cov export` payload.
+fn export_file_names(json: &serde_json::Value) -> Vec<String> {
+    let Some(data) = json.get("data").and_then(|d| d.as_array()) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = data
+        .iter()
+        .filter_map(|e| e.get("files").and_then(|f| f.as_array()))
+        .flatten()
+        .filter_map(|f| f.get("filename").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Render the summary and function table of a single file.
+///
+/// `with_header` prefixes the file name, which the all-files view needs to keep
+/// the per-file sections apart.
+fn render_file_section(json: &serde_json::Value, file: &str, with_header: bool) -> String {
+    let mut out = String::new();
+    if with_header {
+        out.push_str(&format!("\n{}\n{file}\n", "=".repeat(72)));
+    }
+    if let Some(summary) = render_file_summary(json, file) {
+        out.push_str("\nSUMMARY\n\n");
+        out.push_str(&summary);
+    }
+    let functions = parse_functions(json, Some(file));
+    if functions.is_empty() {
+        out.push_str("\nNo function-level region data found for this file.\n");
+    } else {
+        out.push_str(&render_functions(&functions));
+    }
+    out
+}
+
 /// Coverage summary report for a fuzzer (used by the TUI file list view).
 pub fn analyze_coverage(
     coverage_dir: &Path,
@@ -569,24 +997,19 @@ pub fn analyze_coverage(
     profraw_path: Option<&Path>,
     runner: &CoverageRunner,
 ) -> String {
-    let (profdata, binary) = match resolve_profdata_and_binary(
-        coverage_dir,
-        binary_path,
-        sha,
-        profraw_path,
-        runner,
-    ) {
-        Ok(x) => x,
-        Err(e) => return e,
-    };
+    let (profdata, binary) =
+        match resolve_profdata_and_binary(coverage_dir, binary_path, sha, profraw_path, runner) {
+            Ok(x) => x,
+            Err(e) => return e,
+        };
 
     let embedded = embedded_source_paths(&profdata, &binary, runner, coverage_dir);
-    let path_equiv = detect_path_equivalence(&embedded, binary_path);
+    let source_loc = locate_sources(&embedded, binary_path);
     let report = run_report(
         &profdata,
         &binary,
         runner,
-        path_equiv.as_ref(),
+        source_loc.as_ref(),
         coverage_dir,
     );
 
@@ -610,37 +1033,35 @@ pub fn get_file_coverage(
     file_path: Option<&Path>,
     runner: &CoverageRunner,
 ) -> String {
-    let (profdata, binary) = match resolve_profdata_and_binary(
-        coverage_dir,
-        binary_path,
-        sha,
-        profraw_path,
-        runner,
-    ) {
-        Ok(x) => x,
-        Err(e) => return e,
-    };
+    let (profdata, binary) =
+        match resolve_profdata_and_binary(coverage_dir, binary_path, sha, profraw_path, runner) {
+            Ok(x) => x,
+            Err(e) => return e,
+        };
 
     let embedded = embedded_source_paths(&profdata, &binary, runner, coverage_dir);
-    let path_equiv = detect_path_equivalence(&embedded, binary_path);
+    let source_loc = locate_sources(&embedded, binary_path);
 
-    match run_show(
+    let unreadable = match run_show(
         &profdata,
         &binary,
         file_path,
         runner,
-        path_equiv.as_ref(),
+        source_loc.as_ref(),
         coverage_dir,
     ) {
-        Ok(s) if !s.trim().is_empty() => s,
-        Ok(_) => {
-            warn!(
-                "llvm-cov show produced no output for {file_path:?} (binary={binary:?}, path_equiv={path_equiv:?})"
-            );
-            "llvm-cov show produced no output for this file.".to_string()
-        }
-        Err(e) => e,
-    }
+        Ok(ShowOutcome::Annotated(s)) if !s.trim().is_empty() => return s,
+        Ok(ShowOutcome::Annotated(_)) => Vec::new(),
+        Ok(ShowOutcome::NoSource(paths)) => paths,
+        Err(e) => return e,
+    };
+
+    warn!(
+        "No annotated source for {file_path:?} (binary={binary:?}, sources={source_loc:?}); \
+         llvm-cov could not read {unreadable:?}; falling back to region-level coverage"
+    );
+    let export = export_json(&profdata, &binary, runner, coverage_dir, false);
+    render_missing_source_view(file_path, export.as_ref())
 }
 
 #[cfg(test)]
@@ -678,12 +1099,12 @@ mod tests {
         assert!(args.contains(&"--rm".to_string()));
         assert!(args.contains(&"--network=none".to_string()));
 
-        let image_pos = args.iter().position(|a| a == "fuzzing-image:latest").unwrap();
+        let image_pos = args
+            .iter()
+            .position(|a| a == "fuzzing-image:latest")
+            .unwrap();
         let tool_pos = args.iter().position(|a| a == "llvm-profdata").unwrap();
-        assert!(
-            image_pos < tool_pos,
-            "image must appear before tool name"
-        );
+        assert!(image_pos < tool_pos, "image must appear before tool name");
 
         assert!(args.contains(&"-v".to_string()));
         assert!(args.contains(&"/data/coverage:/data/coverage".to_string()));
@@ -767,7 +1188,11 @@ mod tests {
         let coverage_dir = Path::new("/data/coverage/fuzzer1");
         let binary = Path::new("/data/coverage/fuzzer1/fuzzer_abc.bin");
         let mounts = coverage_mounts(coverage_dir, binary);
-        assert_eq!(mounts.len(), 1, "no extra mount when binary is inside coverage_dir");
+        assert_eq!(
+            mounts.len(),
+            1,
+            "no extra mount when binary is inside coverage_dir"
+        );
         assert_eq!(mounts[0].host_path, PathBuf::from("/data/coverage/fuzzer1"));
         assert!(!mounts[0].read_only);
     }
@@ -780,5 +1205,185 @@ mod tests {
         assert_eq!(mounts.len(), 2);
         assert_eq!(mounts[1].host_path, PathBuf::from("/opt/targets"));
         assert!(mounts[1].read_only);
+    }
+
+    #[test]
+    fn build_container_args_dedups_repeated_mount_points() {
+        let mounts = vec![
+            Mount {
+                host_path: PathBuf::from("/src"),
+                read_only: false,
+            },
+            Mount {
+                host_path: PathBuf::from("/src"),
+                read_only: true,
+            },
+        ];
+        let args = build_container_args("img", &[], "llvm-cov", &["show".into()], &mounts);
+        assert_eq!(args.iter().filter(|a| *a == "-v").count(), 1);
+        assert!(args.contains(&"/src:/src".to_string()));
+        assert!(!args.contains(&"/src:/src:ro".to_string()));
+    }
+
+    #[test]
+    fn parse_unreadable_sources_from_stderr() {
+        let stderr = "error: /build/src/parser.c: No such file or directory\n\
+                      warning: The file '/build/src/parser.c' isn't covered.\n\
+                      warning: The file '/build/src/lexer.c' isn't covered.\n\
+                      error: unrelated failure\n";
+        assert_eq!(
+            parse_unreadable_sources(stderr),
+            vec![
+                "/build/src/parser.c".to_string(),
+                "/build/src/lexer.c".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_unreadable_sources_ignores_unrelated_errors() {
+        let stderr = "error: /tmp/x.profdata: profile data is corrupted\n";
+        assert!(parse_unreadable_sources(stderr).is_empty());
+    }
+
+    #[test]
+    fn dedup_ancestors_collapses_nested_dirs() {
+        let dirs = vec![
+            PathBuf::from("/proj/src/net"),
+            PathBuf::from("/proj/src"),
+            PathBuf::from("/usr/include"),
+            PathBuf::from("/proj/src"),
+        ];
+        assert_eq!(
+            dedup_ancestors(dirs),
+            vec![PathBuf::from("/proj/src"), PathBuf::from("/usr/include")]
+        );
+    }
+
+    #[test]
+    fn locate_sources_mounts_without_flag_when_paths_match() {
+        let tmp = assert_fs::TempDir::new().unwrap();
+        let src_dir = tmp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let source = src_dir.join("parser.c");
+        std::fs::write(&source, "int main(void) { return 0; }\n").unwrap();
+
+        let binary = tmp.path().join("build").join("fuzzer");
+        let embedded = vec![source.to_string_lossy().into_owned()];
+        let loc = locate_sources(&embedded, &binary).expect("sources should be located");
+
+        assert!(
+            loc.flag.is_none(),
+            "no path-equivalence needed when the recorded path exists"
+        );
+        assert_eq!(loc.mounts, vec![src_dir]);
+    }
+
+    #[test]
+    fn locate_sources_derives_path_equivalence_when_tree_moved() {
+        let tmp = assert_fs::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("parser.c"), "int x;\n").unwrap();
+        let binary = tmp.path().join("fuzzer");
+
+        let embedded = vec!["/build/elsewhere/parser.c".to_string()];
+        let loc = locate_sources(&embedded, &binary).expect("sources should be located");
+
+        let flag = loc.flag.expect("moved tree needs a path-equivalence flag");
+        assert!(flag.starts_with("-path-equivalence=/build/elsewhere,"));
+        assert_eq!(loc.mounts, vec![tmp.path().to_path_buf()]);
+    }
+
+    #[test]
+    fn locate_sources_none_when_nothing_on_disk() {
+        let tmp = assert_fs::TempDir::new().unwrap();
+        let embedded = vec!["/build/gone/parser.c".to_string()];
+        assert!(locate_sources(&embedded, &tmp.path().join("fuzzer")).is_none());
+    }
+
+    #[test]
+    fn merge_ranges_joins_overlapping_and_adjacent() {
+        let merged = merge_ranges(vec![(10, 12), (13, 15), (30, 40), (35, 50), (1, 2)]);
+        assert_eq!(merged, vec![(1, 2), (10, 15), (30, 50)]);
+    }
+
+    #[test]
+    fn same_source_file_matches_on_basename() {
+        assert!(same_source_file("/build/src/a.c", "/host/src/a.c"));
+        assert!(same_source_file("/build/src/a.c", "/build/src/a.c"));
+        assert!(!same_source_file("/build/src/a.c", "/build/src/b.c"));
+    }
+
+    /// Minimal `llvm-cov export` payload: one file, two functions, one of
+    /// which is never executed.
+    fn sample_export() -> serde_json::Value {
+        serde_json::json!({
+            "data": [{
+                "files": [{
+                    "filename": "/build/src/parser.c",
+                    "summary": {
+                        "lines": { "count": 100, "covered": 60, "percent": 60.0 },
+                        "functions": { "count": 2, "covered": 1, "percent": 50.0 }
+                    }
+                }],
+                "functions": [
+                    {
+                        "name": "parse_header",
+                        "count": 1204,
+                        "filenames": ["/build/src/parser.c"],
+                        "regions": [[12, 1, 48, 2, 1204, 0, 0, 0]]
+                    },
+                    {
+                        "name": "parse_trailer",
+                        "count": 0,
+                        "filenames": ["/build/src/parser.c"],
+                        "regions": [
+                            [142, 1, 160, 2, 0, 0, 0, 0],
+                            [161, 1, 165, 2, 0, 0, 0, 3]
+                        ]
+                    }
+                ]
+            }]
+        })
+    }
+
+    #[test]
+    fn parse_functions_filters_by_file_and_skips_non_code_regions() {
+        let json = sample_export();
+        let functions = parse_functions(&json, Some("/build/src/parser.c"));
+        assert_eq!(functions.len(), 2);
+        assert_eq!(functions[0].name, "parse_header");
+        assert_eq!(functions[0].line_span(), Some((12, 48)));
+        // The gap region (kind 3) of parse_trailer must not widen its span.
+        assert_eq!(functions[1].line_span(), Some((142, 160)));
+        assert_eq!(functions[1].covered_regions(), 0);
+
+        assert!(parse_functions(&json, Some("/build/src/other.c")).is_empty());
+    }
+
+    #[test]
+    fn missing_source_view_reports_regions_instead_of_nothing() {
+        let json = sample_export();
+        let view = render_missing_source_view(Some(Path::new("/build/src/parser.c")), Some(&json));
+
+        assert!(view.starts_with(COVERAGE_SOURCE_UNAVAILABLE_MARKER));
+        assert!(view.contains("/build/src/parser.c"));
+        assert!(view.contains("parse_header"));
+        assert!(view.contains("1204"));
+        assert!(view.contains("142-160"), "uncovered range must be listed");
+        assert!(view.contains("60.00%"), "file summary must be included");
+    }
+
+    #[test]
+    fn missing_source_view_groups_per_file_when_no_file_requested() {
+        let view = render_missing_source_view(None, Some(&sample_export()));
+        assert!(view.contains("/build/src/parser.c"), "file header expected");
+        assert!(view.contains("parse_header"));
+    }
+
+    #[test]
+    fn missing_source_view_without_export_data() {
+        let view = render_missing_source_view(Some(Path::new("/build/src/parser.c")), None);
+        assert!(view.starts_with(COVERAGE_SOURCE_UNAVAILABLE_MARKER));
+        assert!(view.contains("No region data available"));
     }
 }

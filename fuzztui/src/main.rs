@@ -23,9 +23,7 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 use reqwest::Url;
-use scheduler::Sha;
-
-use scheduler::TaskStatus;
+use scheduler::{Sha, TaskStatus, COVERAGE_SOURCE_UNAVAILABLE_MARKER};
 
 #[derive(Debug)]
 pub struct TabsState {
@@ -512,10 +510,8 @@ impl App {
                 if self.coverage.view_open && self.coverage.mode == CoverageMode::Loading {
                     match result {
                         CoverageResult::Summary(text) => {
-                            let (rows, paths, file_col) =
-                                Self::parse_coverage_summary(&text);
-                            self.coverage.summary_index =
-                                if rows.len() > 1 { 1 } else { 0 };
+                            let (rows, paths, file_col) = Self::parse_coverage_summary(&text);
+                            self.coverage.summary_index = if rows.len() > 1 { 1 } else { 0 };
                             self.coverage.summary_rows = rows;
                             self.coverage.file_paths = paths;
                             self.coverage.file_col = file_col;
@@ -583,23 +579,19 @@ impl App {
         // Handle coverage view
         if self.coverage.view_open {
             match key_event.code {
-                KeyCode::Up => {
-                    match self.coverage.mode {
-                        CoverageMode::Loading => {}
-                        CoverageMode::FileList => {
-                            if self.coverage.summary_rows.len() > 1
-                                && self.coverage.summary_index > 1
-                            {
-                                self.coverage.summary_index -= 1;
-                            }
-                        }
-                        CoverageMode::FileView => {
-                            if self.coverage.scroll_offset > 0 {
-                                self.coverage.scroll_offset -= 1;
-                            }
+                KeyCode::Up => match self.coverage.mode {
+                    CoverageMode::Loading => {}
+                    CoverageMode::FileList => {
+                        if self.coverage.summary_rows.len() > 1 && self.coverage.summary_index > 1 {
+                            self.coverage.summary_index -= 1;
                         }
                     }
-                }
+                    CoverageMode::FileView => {
+                        if self.coverage.scroll_offset > 0 {
+                            self.coverage.scroll_offset -= 1;
+                        }
+                    }
+                },
                 KeyCode::Down => match self.coverage.mode {
                     CoverageMode::Loading => {}
                     CoverageMode::FileList => {
@@ -878,9 +870,7 @@ impl App {
                             .get_task_coverage(&sha)
                     }
                 }
-                Err(_) => {
-                    "Error: Scheduler lock poisoned (internal error)".to_string()
-                }
+                Err(_) => "Error: Scheduler lock poisoned (internal error)".to_string(),
             };
             let _ = tx.send(CoverageResult::Summary(result));
         });
@@ -1097,9 +1087,7 @@ impl App {
                         "Error: scheduler index out of range.".to_string()
                     }
                 }
-                Err(_) => {
-                    "Could not read scheduler (lock poisoned). Restart fuzztui.".to_string()
-                }
+                Err(_) => "Could not read scheduler (lock poisoned). Restart fuzztui.".to_string(),
             };
             let _ = tx.send(CoverageResult::FileDetail(result));
         });
@@ -1184,6 +1172,14 @@ impl App {
         }
         self.exit = true;
     }
+}
+
+/// Byte offset of the `n`-th character of `s`, or its length when shorter.
+///
+/// Slicing coverage output by byte offset would panic on the multi-byte
+/// characters found in source comments.
+fn char_boundary(s: &str, n: usize) -> usize {
+    s.char_indices().nth(n).map_or(s.len(), |(i, _)| i)
 }
 
 impl Widget for &App {
@@ -1680,16 +1676,16 @@ impl Widget for &App {
             };
 
             // Determine title and content based on mode
-            let (title, coverage_text, show_file_list) = match self.coverage.mode {
+            let (title, coverage_text, show_file_list, degraded) = match self.coverage.mode {
                 CoverageMode::Loading => {
                     let title = " Coverage ".to_string();
                     let text = "Loading coverage data...".to_string();
-                    (title, text, false)
+                    (title, text, false, false)
                 }
                 CoverageMode::FileList => {
                     let title = format!(" Coverage Summary ({}) ", self.coverage.data_row_count());
                     let text = String::new(); // Will be replaced by unified table
-                    (title, text, true)
+                    (title, text, true, false)
                 }
                 CoverageMode::FileView => {
                     let file_name = self
@@ -1697,28 +1693,39 @@ impl Widget for &App {
                         .and_then(|p| p.split('/').next_back().map(String::from))
                         .unwrap_or_else(|| "Unknown".to_string());
                     let n = self.coverage.data_row_count();
-                    let title = format!(
-                        " File: {} ({}/{}) ",
-                        file_name,
-                        self.coverage.summary_index,
-                        n.max(1)
-                    );
                     let text = if let Some(ref data) = self.coverage.file_data {
                         data.clone()
                     } else {
                         "Loading file coverage...".to_string()
                     };
-                    (title, text, false)
+                    // The scheduler could not read the source and fell back to
+                    // region-level coverage; flag it instead of letting the
+                    // panel look like ordinary annotated source.
+                    let degraded = text.starts_with(COVERAGE_SOURCE_UNAVAILABLE_MARKER);
+                    let suffix = if degraded {
+                        " - source unavailable "
+                    } else {
+                        " "
+                    };
+                    let title = format!(
+                        " File: {} ({}/{}){}",
+                        file_name,
+                        self.coverage.summary_index,
+                        n.max(1),
+                        suffix
+                    );
+                    (title, text, false, degraded)
                 }
             };
 
             // Use full area for unified table view
             let table_area = popup_area;
 
+            let border_color = if degraded { Color::Yellow } else { Color::Cyan };
             let popup_block = Block::bordered()
                 .title(title)
                 .border_set(border::THICK)
-                .border_style(Style::default().fg(Color::Cyan))
+                .border_style(Style::default().fg(border_color))
                 .style(Style::default().bg(Color::DarkGray).fg(Color::White));
 
             if show_file_list {
@@ -1842,42 +1849,32 @@ impl Widget for &App {
                         .render(table_area, buf);
                 }
             } else {
-                // Split coverage text into lines and handle word wrapping
-                // We need to wrap long lines to fit within the popup width
-                let available_width = popup_area.width.saturating_sub(2); // Account for borders
+                // Lines are wrapped here rather than by the Paragraph widget:
+                // annotated source and the region tables rely on leading
+                // whitespace, which `Wrap { trim: true }` would strip.
+                let available_width = popup_area.width.saturating_sub(2) as usize; // Borders
                 let mut wrapped_lines = Vec::new();
 
                 for line in coverage_text.lines() {
-                    if line.len() as u16 <= available_width {
-                        // Line fits, add as is
+                    if available_width == 0 || line.chars().count() <= available_width {
                         wrapped_lines.push(Line::from(line.to_string()));
-                    } else {
-                        // Line is too long, wrap it
-                        let mut remaining = line;
-                        while !remaining.is_empty() {
-                            let chunk = if remaining.len() as u16 > available_width {
-                                // Find a good break point (space or tab)
-                                let max_chars = available_width as usize;
-                                let mut break_point = max_chars;
-
-                                // Try to break at a space or tab
-                                if let Some(last_space) =
-                                    remaining[..max_chars.min(remaining.len())].rfind([' ', '\t'])
-                                {
-                                    break_point = last_space + 1;
-                                }
-
-                                let (chunk, rest) =
-                                    remaining.split_at(break_point.min(remaining.len()));
-                                remaining = rest.trim_start();
-                                chunk.to_string()
-                            } else {
-                                let result = remaining.to_string();
-                                remaining = "";
-                                result
-                            };
-                            wrapped_lines.push(Line::from(chunk));
+                        continue;
+                    }
+                    let mut remaining = line;
+                    while !remaining.is_empty() {
+                        let limit = char_boundary(remaining, available_width);
+                        if limit == remaining.len() {
+                            wrapped_lines.push(Line::from(remaining.to_string()));
+                            break;
                         }
+                        // Prefer breaking at a space or tab to keep words intact.
+                        let break_point = remaining[..limit]
+                            .rfind([' ', '\t'])
+                            .map(|i| i + 1)
+                            .unwrap_or(limit);
+                        let (chunk, rest) = remaining.split_at(break_point);
+                        wrapped_lines.push(Line::from(chunk.to_string()));
+                        remaining = rest;
                     }
                 }
 
@@ -1885,7 +1882,7 @@ impl Widget for &App {
                 Paragraph::new(coverage_text_widget)
                     .block(popup_block)
                     .scroll((self.coverage.scroll_offset, 0))
-                    .wrap(ratatui::widgets::Wrap { trim: true })
+                    .wrap(ratatui::widgets::Wrap { trim: false })
                     .render(popup_area, buf);
             }
 

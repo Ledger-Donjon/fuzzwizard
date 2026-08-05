@@ -111,6 +111,8 @@ pub type Result<T> = std::result::Result<T, SchedulerError>;
 /// Coverage analysis module
 mod coverage;
 
+pub use coverage::COVERAGE_SOURCE_UNAVAILABLE_MARKER;
+
 /// Security validation module for input sanitization
 pub mod validation {
     use super::{Result, SchedulerError};
