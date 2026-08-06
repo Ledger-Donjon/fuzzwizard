@@ -641,7 +641,7 @@ pub struct Task {
     stderr: ChildStderr,
     started_at: Instant,
     container_name: Option<String>,
-    /// Expected `.profraw` path (set after spawn using the child PID).
+    /// LLVM `.profraw` filename pattern. `%m` is resolved when coverage is read.
     profraw_path: Option<PathBuf>,
     /// Status of the task (running, crashed, or stopped)
     pub status: TaskStatus,
@@ -677,6 +677,36 @@ fn remove_container(binary: &Path, name: &str) {
             .spawn()
             .and_then(|mut child| child.wait());
     });
+}
+
+/// Resolve the files produced by LLVM's `%m` online-merge filename token.
+///
+/// The runtime expands `%m` to a load module signature that cannot be computed
+/// ahead of time, so the directory is listed instead. A fuzzer normally yields
+/// a single file; the `<sha>-` prefix keeps profiles of other builds out.
+fn resolve_profraw_paths(pattern: &Path) -> Vec<PathBuf> {
+    let Some(parent) = pattern.parent() else {
+        return Vec::new();
+    };
+    let Some(file_pattern) = pattern.file_name().and_then(|name| name.to_str()) else {
+        return Vec::new();
+    };
+    let Some((prefix, suffix)) = file_pattern.split_once("%m") else {
+        return Vec::new();
+    };
+
+    let mut paths: Vec<PathBuf> = fs::read_dir(parent)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            (name.starts_with(prefix) && name.ends_with(suffix)).then(|| entry.path())
+        })
+        .collect();
+    paths.sort();
+    paths
 }
 
 /// Helper function to collect coverage from a containerized fuzzer
@@ -1335,7 +1365,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                     "--tmpfs".into(),
                     "/tmp:rw,noexec,nosuid,size=256m".into(),
                     "-e".into(),
-                    format!("LLVM_PROFILE_FILE=/fuzzer/coverage/{sha_hex}.profraw"),
+                    format!("LLVM_PROFILE_FILE=/fuzzer/coverage/{sha_hex}-%m.profraw"),
                     "-v".into(),
                     format!("{}:/fuzzer/binary:ro", fuzzer_path.display()),
                     "-v".into(),
@@ -1401,7 +1431,7 @@ impl<C: TargetsCollector> Scheduler<C> {
 
             if self.has_coverage {
                 args.push(format!(
-                    "-LLVM_PROFILE_FILE={}/{}.profraw",
+                    "-LLVM_PROFILE_FILE={}/{}-%m.profraw",
                     fuzzer_coveragedir.display(),
                     sha_hex,
                 ));
@@ -1425,7 +1455,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             if self.has_coverage {
                 cmd.env(
                     "LLVM_PROFILE_FILE",
-                    format!("{}/{}.profraw", fuzzer_coveragedir.display(), sha_hex),
+                    format!("{}/{}-%m.profraw", fuzzer_coveragedir.display(), sha_hex),
                 );
             }
 
@@ -1460,7 +1490,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             );
         }
         let profraw_path = if self.has_coverage {
-            Some(fuzzer_coveragedir.join(format!("{sha_hex}.profraw")))
+            Some(fuzzer_coveragedir.join(format!("{sha_hex}-%m.profraw")))
         } else {
             None
         };
@@ -1898,14 +1928,14 @@ impl<C: TargetsCollector> Scheduler<C> {
             .unwrap_or("unknown");
 
         let coverage_dir = self.coverage_directory.join(fuzzer_name);
+        let profraw_paths = task
+            .profraw_path
+            .as_deref()
+            .map(resolve_profraw_paths)
+            .unwrap_or_default();
+        let profraw_refs: Vec<&Path> = profraw_paths.iter().map(PathBuf::as_path).collect();
 
-        coverage::analyze_coverage(
-            &coverage_dir,
-            &task.path,
-            sha,
-            task.profraw_path.as_deref(),
-            &runner,
-        )
+        coverage::analyze_coverage(&coverage_dir, &task.path, sha, &profraw_refs, &runner)
     }
 
     /// Collect profraw paths, coverage binaries, and original binary paths
@@ -1923,9 +1953,7 @@ impl<C: TargetsCollector> Scheduler<C> {
 
         for (sha, task) in self.tasks.iter() {
             if let Some(ref profraw) = task.profraw_path {
-                if profraw.exists() {
-                    profraw_paths.push(profraw.clone());
-                }
+                profraw_paths.extend(resolve_profraw_paths(profraw));
             }
             let fuzzer_name = task
                 .path
@@ -2027,14 +2055,53 @@ impl<C: TargetsCollector> Scheduler<C> {
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
         let coverage_dir = self.coverage_directory.join(fuzzer_name);
+        let profraw_paths = task
+            .profraw_path
+            .as_deref()
+            .map(resolve_profraw_paths)
+            .unwrap_or_default();
+        let profraw_refs: Vec<&Path> = profraw_paths.iter().map(PathBuf::as_path).collect();
 
         coverage::get_file_coverage(
             &coverage_dir,
             &task.path,
             sha,
-            task.profraw_path.as_deref(),
+            &profraw_refs,
             file_path,
             &runner,
         )
+    }
+}
+
+#[cfg(test)]
+mod profraw_path_tests {
+    use super::resolve_profraw_paths;
+    use assert_fs::prelude::*;
+
+    #[test]
+    fn resolves_llvm_online_merge_profiles() {
+        let temp_dir = assert_fs::TempDir::new().unwrap();
+        temp_dir
+            .child("abc-123456_0.profraw")
+            .write_binary(b"profile 1")
+            .unwrap();
+        temp_dir
+            .child("abc-987654_0.profraw")
+            .write_binary(b"profile 2")
+            .unwrap();
+        temp_dir
+            .child("other-123456_0.profraw")
+            .write_binary(b"other")
+            .unwrap();
+
+        let paths = resolve_profraw_paths(&temp_dir.path().join("abc-%m.profraw"));
+
+        assert_eq!(paths.len(), 2);
+        assert!(paths.iter().all(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("abc-")
+        }));
     }
 }

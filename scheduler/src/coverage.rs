@@ -215,15 +215,11 @@ fn resolve_profdata_and_binary(
     coverage_dir: &Path,
     binary_path: &Path,
     sha: &Sha,
-    profraw_path: Option<&Path>,
+    profraw_paths: &[&Path],
     runner: &CoverageRunner,
 ) -> Result<(PathBuf, PathBuf), String> {
-    let profraw = profraw_path.ok_or_else(|| "No profraw path set for this task".to_string())?;
-    if !profraw.exists() {
-        return Err(format!("Profraw file not found: {}", profraw.display()));
-    }
     let profdata_out = coverage_dir.join("coverage.profdata");
-    let profdata = merge_profdata(&[profraw], &profdata_out, coverage_dir, runner)?;
+    let profdata = merge_profdata(profraw_paths, &profdata_out, coverage_dir, runner)?;
 
     let coverage_binary = coverage_dir.join(format!("fuzzer_{}.bin", hex::encode(sha)));
     let binary = if coverage_binary.exists() {
@@ -1027,11 +1023,11 @@ pub fn analyze_coverage(
     coverage_dir: &Path,
     binary_path: &Path,
     sha: &Sha,
-    profraw_path: Option<&Path>,
+    profraw_paths: &[&Path],
     runner: &CoverageRunner,
 ) -> String {
     let (profdata, binary) =
-        match resolve_profdata_and_binary(coverage_dir, binary_path, sha, profraw_path, runner) {
+        match resolve_profdata_and_binary(coverage_dir, binary_path, sha, profraw_paths, runner) {
             Ok(x) => x,
             Err(e) => return e,
         };
@@ -1057,12 +1053,12 @@ pub fn get_file_coverage(
     coverage_dir: &Path,
     binary_path: &Path,
     sha: &Sha,
-    profraw_path: Option<&Path>,
+    profraw_paths: &[&Path],
     file_path: Option<&Path>,
     runner: &CoverageRunner,
 ) -> String {
     let (profdata, binary) =
-        match resolve_profdata_and_binary(coverage_dir, binary_path, sha, profraw_path, runner) {
+        match resolve_profdata_and_binary(coverage_dir, binary_path, sha, profraw_paths, runner) {
             Ok(x) => x,
             Err(e) => return e,
         };
