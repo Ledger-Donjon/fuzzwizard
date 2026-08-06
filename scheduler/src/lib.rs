@@ -1908,6 +1908,99 @@ impl<C: TargetsCollector> Scheduler<C> {
         )
     }
 
+    /// Collect profraw paths, coverage binaries, and original binary paths
+    /// from all tasks for project-wide coverage.
+    ///
+    /// Returns `(profraw_paths, coverage_binaries, original_paths)`:
+    /// - `coverage_binaries` are the instrumented copies under `coverage_directory/`
+    ///   (used as `-object` arguments for `llvm-cov`).
+    /// - `original_paths` are the original task binary paths (used by
+    ///   `locate_sources` to find the source tree via path-equivalence).
+    fn collect_project_coverage_inputs(&self) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) {
+        let mut profraw_paths = Vec::new();
+        let mut binaries = Vec::new();
+        let mut original_paths = Vec::new();
+
+        for (sha, task) in self.tasks.iter() {
+            if let Some(ref profraw) = task.profraw_path {
+                if profraw.exists() {
+                    profraw_paths.push(profraw.clone());
+                }
+            }
+            let fuzzer_name = task
+                .path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown");
+            let cov_dir = self.coverage_directory.join(fuzzer_name);
+            let coverage_binary = cov_dir.join(format!("fuzzer_{}.bin", hex::encode(sha)));
+            if coverage_binary.exists() {
+                binaries.push(coverage_binary);
+            } else if task.path.exists() {
+                binaries.push(task.path.clone());
+            }
+            original_paths.push(task.path.clone());
+        }
+
+        (profraw_paths, binaries, original_paths)
+    }
+
+    /// Get project-wide coverage by merging all task profraw files.
+    ///
+    /// Returns a summary report covering every fuzzer managed by this
+    /// scheduler.  The merge runs `llvm-profdata merge` over all available
+    /// `.profraw` files, then `llvm-cov report` with every instrumented
+    /// binary as object.
+    pub fn get_project_coverage(&self) -> String {
+        if !self.has_coverage {
+            return "Coverage is not enabled for this scheduler".to_string();
+        }
+
+        let runner = match self.coverage_runner() {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
+        let (profraw_paths, binaries, original_paths) = self.collect_project_coverage_inputs();
+        let profraw_refs: Vec<&Path> = profraw_paths.iter().map(|p| p.as_path()).collect();
+
+        coverage::analyze_project_coverage(
+            &self.coverage_directory,
+            &profraw_refs,
+            &binaries,
+            &original_paths,
+            &runner,
+        )
+    }
+
+    /// Get project-wide file coverage (or all files).
+    ///
+    /// Same merge + multi-object logic as [`get_project_coverage`] but with
+    /// `llvm-cov show` for line-by-line annotated source.  Falls back to
+    /// region-level data when sources are unavailable.
+    pub fn get_project_file_coverage(&self, file_path: Option<&Path>) -> String {
+        if !self.has_coverage {
+            return "Coverage is not enabled for this scheduler".to_string();
+        }
+
+        let runner = match self.coverage_runner() {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
+        let (profraw_paths, binaries, original_paths) = self.collect_project_coverage_inputs();
+        let profraw_refs: Vec<&Path> = profraw_paths.iter().map(|p| p.as_path()).collect();
+
+        coverage::get_project_file_coverage(
+            &self.coverage_directory,
+            &profraw_refs,
+            &binaries,
+            &original_paths,
+            file_path,
+            &runner,
+        )
+    }
+
     /// Get coverage for a specific file (or all files) in a task.
     ///
     /// When `file_path` is `Some`, returns annotated source for that file.

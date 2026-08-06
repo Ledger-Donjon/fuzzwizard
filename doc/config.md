@@ -306,6 +306,7 @@ Base directory for coverage files.
 - Each fuzzer has its own subdirectory: `{coverage_directory}/{fuzzer_name}/`
 - Used only if `has_coverage: true`
 - `.profraw` files are stored here
+- Project-wide merged profile is written to `{coverage_directory}/project.profdata` on demand
 
 **Example**: `"/opt/fuzzwizard/coverage"`
 

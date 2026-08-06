@@ -109,6 +109,8 @@ struct CoverageViewState {
     file_col: Option<usize>,
     /// Selected row index (0 = header, 1 = first file). Also identifies which file is shown in FileView.
     summary_index: usize,
+    /// When true, the view shows project-wide (multi-fuzzer) coverage.
+    project_mode: bool,
 }
 
 impl CoverageViewState {
@@ -123,6 +125,7 @@ impl CoverageViewState {
             file_paths: Vec::new(),
             file_col: None,
             summary_index: 0,
+            project_mode: false,
         }
     }
 
@@ -735,8 +738,12 @@ impl App {
             KeyCode::Char('d') if self.tabs.index > 0 => {
                 let scheduler_index = self.tabs.index - 1;
                 if let Some(task) = self.selected_task(scheduler_index) {
-                    self.display_coverage(scheduler_index, &task);
+                    self.display_coverage(scheduler_index, Some(&task));
                 }
+            }
+            KeyCode::Char('p') if self.tabs.index > 0 => {
+                let scheduler_index = self.tabs.index - 1;
+                self.display_coverage(scheduler_index, None);
             }
             _ => {}
         }
@@ -753,9 +760,11 @@ impl App {
                 self.task_menu_actions.push("START".to_string());
             }
         }
-        // Always add Display Coverage option if we're in a scheduler view
+        // Always add Display Coverage options if we're in a scheduler view
         if self.tabs.index > 0 {
             self.task_menu_actions.push("DISPLAY COVERAGE".to_string());
+            self.task_menu_actions
+                .push("DISPLAY PROJECT COVERAGE".to_string());
         }
         self.task_menu_selection = 0;
         self.task_menu_open = true;
@@ -792,11 +801,15 @@ impl App {
             return;
         };
 
-        // Handle DISPLAY COVERAGE action separately (doesn't need launcher write lock)
+        // Handle coverage actions separately (don't need launcher write lock)
         if action == "DISPLAY COVERAGE" {
             if let Some(task) = self.selected_task(scheduler_index) {
-                self.display_coverage(scheduler_index, &task);
+                self.display_coverage(scheduler_index, Some(&task));
             }
+            return;
+        }
+        if action == "DISPLAY PROJECT COVERAGE" {
+            self.display_coverage(scheduler_index, None);
             return;
         }
 
@@ -844,7 +857,9 @@ impl App {
         })
     }
 
-    fn display_coverage(&mut self, scheduler_index: usize, task: &TaskInfo) {
+    /// Open the coverage overlay for a single task (`Some(task)`) or
+    /// project-wide (`None`).
+    fn display_coverage(&mut self, scheduler_index: usize, task: Option<&TaskInfo>) {
         self.coverage.view_open = true;
         self.coverage.scroll_offset = 0;
         self.coverage.mode = CoverageMode::Loading;
@@ -854,9 +869,10 @@ impl App {
         self.coverage.file_paths = Vec::new();
         self.coverage.file_col = None;
         self.coverage.summary_index = 0;
+        self.coverage.project_mode = task.is_none();
 
         let launcher = self.launcher.clone();
-        let sha = task.sha;
+        let sha = task.map(|t| t.sha);
         let tx = self.coverage_sender.clone();
 
         thread::spawn(move || {
@@ -865,9 +881,11 @@ impl App {
                     if scheduler_index >= l.scheduler_processes.len() {
                         "Error: Scheduler not found".to_string()
                     } else {
-                        l.scheduler_processes[scheduler_index]
-                            .scheduler
-                            .get_task_coverage(&sha)
+                        let sched = &l.scheduler_processes[scheduler_index].scheduler;
+                        match sha {
+                            Some(s) => sched.get_task_coverage(&s),
+                            None => sched.get_project_coverage(),
+                        }
                     }
                 }
                 Err(_) => "Error: Scheduler lock poisoned (internal error)".to_string(),
@@ -1059,14 +1077,20 @@ impl App {
             Some(std::path::PathBuf::from(&file_path))
         };
 
-        let task_sha = if let Some(tasks) = self.tasks_cache.get(&scheduler_index) {
-            if self.task_selection_index < tasks.len() {
-                tasks[self.task_selection_index].sha
+        let project_mode = self.coverage.project_mode;
+
+        let task_sha = if !project_mode {
+            if let Some(tasks) = self.tasks_cache.get(&scheduler_index) {
+                if self.task_selection_index < tasks.len() {
+                    Some(tasks[self.task_selection_index].sha)
+                } else {
+                    return;
+                }
             } else {
                 return;
             }
         } else {
-            return;
+            None
         };
 
         self.coverage.mode = CoverageMode::Loading;
@@ -1079,12 +1103,17 @@ impl App {
         thread::spawn(move || {
             let result = match launcher.read() {
                 Ok(l) => {
-                    if scheduler_index < l.scheduler_processes.len() {
+                    if scheduler_index >= l.scheduler_processes.len() {
+                        "Error: scheduler index out of range.".to_string()
+                    } else if project_mode {
                         l.scheduler_processes[scheduler_index]
                             .scheduler
-                            .get_task_file_coverage(&task_sha, file_path_opt.as_deref())
+                            .get_project_file_coverage(file_path_opt.as_deref())
                     } else {
-                        "Error: scheduler index out of range.".to_string()
+                        let sha = task_sha.unwrap();
+                        l.scheduler_processes[scheduler_index]
+                            .scheduler
+                            .get_task_file_coverage(&sha, file_path_opt.as_deref())
                     }
                 }
                 Err(_) => "Could not read scheduler (lock poisoned). Restart fuzztui.".to_string(),
@@ -1220,9 +1249,8 @@ impl Widget for &App {
         let content_area = vertical[1];
 
         // Build instructions based on current tab
-        let instructions = if self.tabs.index == 0 {
-            // Processes view - no Manage Task option
-            Line::from(vec![
+        let instruction_spans: Vec<Span> = if self.tabs.index == 0 {
+            vec![
                 " Quit ".into(),
                 "<Q> ".blue().bold(),
                 " | Navigate ".into(),
@@ -1231,28 +1259,64 @@ impl Widget for &App {
                 "<Up/Down> ".blue().bold(),
                 " | Reload Config ".into(),
                 "<C> ".blue().bold(),
-            ])
+            ]
         } else {
-            // Scheduler view - include Manage Task and Display Coverage options
-            Line::from(vec![
+            vec![
                 " Quit ".into(),
                 "<Q> ".blue().bold(),
                 " | Navigate ".into(),
                 "<Left/Right> ".blue().bold(),
-                " | Navigate Tasks ".into(),
+                " | Tasks ".into(),
                 "<Up/Down> ".blue().bold(),
-                " | Reload Config ".into(),
+                " | Config ".into(),
                 "<C> ".blue().bold(),
-                " | Manage Task ".into(),
+                " | Menu ".into(),
                 "<M> ".blue().bold(),
-                " | Display Coverage ".into(),
+                " | Coverage ".into(),
                 "<D> ".blue().bold(),
-            ])
+                " | Project Cov ".into(),
+                "<P> ".blue().bold(),
+            ]
         };
 
-        let block = Block::bordered()
-            .title_bottom(instructions.centered())
-            .border_set(border::THICK);
+        let border_inner_width = content_area.width.saturating_sub(2);
+        let instruction_lines =
+            App::wrap_instruction_line(instruction_spans, border_inner_width);
+        let multiline_footer = instruction_lines.len() > 1;
+
+        let footer_height = if multiline_footer {
+            instruction_lines.len() as u16
+        } else {
+            0
+        };
+
+        let (main_content_area, footer_area, footer_lines, block) = if multiline_footer {
+            let main_h = content_area.height.saturating_sub(footer_height);
+            (
+                Rect {
+                    height: main_h,
+                    ..content_area
+                },
+                Some(Rect {
+                    x: content_area.x + 1,
+                    y: content_area.y + main_h,
+                    width: border_inner_width,
+                    height: footer_height,
+                }),
+                Some(instruction_lines),
+                Block::bordered().border_set(border::THICK),
+            )
+        } else {
+            let single = instruction_lines.into_iter().next().unwrap_or_default();
+            (
+                content_area,
+                None,
+                None,
+                Block::bordered()
+                    .title_bottom(single.centered())
+                    .border_set(border::THICK),
+            )
+        };
 
         // Always use cache for display (never blocks, always shows last available data)
         // Check if we're on the Processes tab (index 0)
@@ -1390,7 +1454,7 @@ impl Widget for &App {
             Paragraph::new(text)
                 .block(block)
                 .scroll((self.scroll_offset, 0))
-                .render(content_area, buf);
+                .render(main_content_area, buf);
         } else {
             // Display scheduler information (index > 0)
             let scheduler_index = self.tabs.index - 1; // Adjust for "Processes" tab at index 0
@@ -1406,7 +1470,7 @@ impl Widget for &App {
                         Constraint::Length(6), // Fixed height for header info
                         Constraint::Min(0),    // Rest for table
                     ])
-                    .split(content_area);
+                    .split(main_content_area);
 
                 // Build header content (always visible)
                 // Apply dim style if scheduler is stopped
@@ -1644,8 +1708,16 @@ impl Widget for &App {
                 Paragraph::new(text)
                     .block(block)
                     .scroll((self.scroll_offset, 0))
-                    .render(content_area, buf);
+                    .render(main_content_area, buf);
             }
+        }
+
+        // Render multi-line footer when instructions don't fit on the border
+        if let (Some(f_area), Some(f_lines)) = (footer_area, footer_lines) {
+            let footer_text = Text::from(f_lines);
+            Paragraph::new(footer_text)
+                .alignment(ratatui::layout::Alignment::Center)
+                .render(f_area, buf);
         }
 
         // Show coverage view as overlay if active (rendered before task menu)
@@ -1675,15 +1747,21 @@ impl Widget for &App {
                 height: popup_height,
             };
 
+            let coverage_label = if self.coverage.project_mode {
+                "Project Coverage"
+            } else {
+                "Coverage"
+            };
+
             // Determine title and content based on mode
             let (title, coverage_text, show_file_list, degraded) = match self.coverage.mode {
                 CoverageMode::Loading => {
-                    let title = " Coverage ".to_string();
+                    let title = format!(" {coverage_label} ");
                     let text = "Loading coverage data...".to_string();
                     (title, text, false, false)
                 }
                 CoverageMode::FileList => {
-                    let title = format!(" Coverage Summary ({}) ", self.coverage.data_row_count());
+                    let title = format!(" {coverage_label} Summary ({}) ", self.coverage.data_row_count());
                     let text = String::new(); // Will be replaced by unified table
                     (title, text, true, false)
                 }

@@ -171,20 +171,24 @@ fn llvm_tool_container(name: &str, llvm_bin_dir: Option<&Path>) -> String {
     }
 }
 
-/// Convert `.profraw` → indexed `.profdata` via `llvm-profdata merge`.
+/// Merge one or more `.profraw` files into an indexed `.profdata` via
+/// `llvm-profdata merge`.
 fn merge_profdata(
-    profraw: &Path,
+    profraw_paths: &[&Path],
+    profdata_out: &Path,
     coverage_dir: &Path,
     runner: &CoverageRunner,
 ) -> Result<PathBuf, String> {
-    let profdata = coverage_dir.join("coverage.profdata");
-    let tool_args = vec![
-        "merge".into(),
-        "-sparse".into(),
-        profraw.to_string_lossy().into_owned(),
-        "-o".into(),
-        profdata.to_string_lossy().into_owned(),
-    ];
+    if profraw_paths.is_empty() {
+        return Err("No profraw files available for coverage merge".to_string());
+    }
+    let mut tool_args: Vec<String> = vec!["merge".into(), "-sparse".into()];
+    for p in profraw_paths {
+        tool_args.push(p.to_string_lossy().into_owned());
+    }
+    tool_args.push("-o".into());
+    tool_args.push(profdata_out.to_string_lossy().into_owned());
+
     let mounts = vec![Mount {
         host_path: coverage_dir.to_path_buf(),
         read_only: false,
@@ -203,7 +207,7 @@ fn merge_profdata(
         }
         return Err(format!("llvm-profdata merge failed:\n{stderr}"));
     }
-    Ok(profdata)
+    Ok(profdata_out.to_path_buf())
 }
 
 /// Resolve `.profdata` and the instrumented binary for a fuzzer.
@@ -218,7 +222,8 @@ fn resolve_profdata_and_binary(
     if !profraw.exists() {
         return Err(format!("Profraw file not found: {}", profraw.display()));
     }
-    let profdata = merge_profdata(profraw, coverage_dir, runner)?;
+    let profdata_out = coverage_dir.join("coverage.profdata");
+    let profdata = merge_profdata(&[profraw], &profdata_out, coverage_dir, runner)?;
 
     let coverage_binary = coverage_dir.join(format!("fuzzer_{}.bin", hex::encode(sha)));
     let binary = if coverage_binary.exists() {
@@ -267,11 +272,14 @@ fn collect_filenames(v: &serde_json::Value, out: &mut HashSet<String>) {
 /// what lets us report coverage when the sources themselves are unavailable.
 fn export_json(
     profdata: &Path,
-    binary: &Path,
+    binaries: &[PathBuf],
     runner: &CoverageRunner,
     coverage_dir: &Path,
     summary_only: bool,
 ) -> Option<serde_json::Value> {
+    if binaries.is_empty() {
+        return None;
+    }
     let mut tool_args: Vec<String> = vec!["export".into()];
     if summary_only {
         tool_args.push("--summary-only".into());
@@ -279,9 +287,9 @@ fn export_json(
     tool_args.extend([
         "-instr-profile".into(),
         profdata.to_string_lossy().into_owned(),
-        binary.to_string_lossy().into_owned(),
     ]);
-    let mounts = coverage_mounts(coverage_dir, binary);
+    push_binary_args(&mut tool_args, binaries);
+    let mounts = coverage_mounts(coverage_dir, binaries);
     let output = match runner.command("llvm-cov", &tool_args, &mounts).output() {
         Ok(o) if o.status.success() => o,
         Ok(o) => {
@@ -306,14 +314,15 @@ fn export_json(
     }
 }
 
-/// Extract source file paths embedded in the binary via `llvm-cov export --summary-only`.
+/// Extract source file paths embedded in the binary(ies) via
+/// `llvm-cov export --summary-only`.
 fn embedded_source_paths(
     profdata: &Path,
-    binary: &Path,
+    binaries: &[PathBuf],
     runner: &CoverageRunner,
     coverage_dir: &Path,
 ) -> Vec<String> {
-    let Some(json) = export_json(profdata, binary, runner, coverage_dir, true) else {
+    let Some(json) = export_json(profdata, binaries, runner, coverage_dir, true) else {
         return Vec::new();
     };
     let result = parse_filenames_from_export(&json);
@@ -416,21 +425,37 @@ fn locate_sources(embedded_paths: &[String], host_binary_path: &Path) -> Option<
 }
 
 /// Collect the base mounts needed for coverage commands: `coverage_dir` (rw)
-/// and the binary's parent directory (ro, only if it lives outside `coverage_dir`).
-fn coverage_mounts(coverage_dir: &Path, binary: &Path) -> Vec<Mount> {
+/// and each binary's parent directory (ro, only if it lives outside `coverage_dir`).
+fn coverage_mounts(coverage_dir: &Path, binaries: &[PathBuf]) -> Vec<Mount> {
     let mut mounts = vec![Mount {
         host_path: coverage_dir.to_path_buf(),
         read_only: false,
     }];
-    if let Some(bin_dir) = binary.parent() {
-        if !bin_dir.starts_with(coverage_dir) {
-            mounts.push(Mount {
-                host_path: bin_dir.to_path_buf(),
-                read_only: true,
-            });
+    for binary in binaries {
+        if let Some(bin_dir) = binary.parent() {
+            if !bin_dir.starts_with(coverage_dir) {
+                mounts.push(Mount {
+                    host_path: bin_dir.to_path_buf(),
+                    read_only: true,
+                });
+            }
         }
     }
     mounts
+}
+
+/// Push multi-object binary arguments for `llvm-cov` subcommands.
+///
+/// The first binary is a positional argument; additional binaries use
+/// `-object` flags.
+fn push_binary_args(tool_args: &mut Vec<String>, binaries: &[PathBuf]) {
+    if let Some(first) = binaries.first() {
+        tool_args.push(first.to_string_lossy().into_owned());
+    }
+    for extra in binaries.iter().skip(1) {
+        tool_args.push("-object".into());
+        tool_args.push(extra.to_string_lossy().into_owned());
+    }
 }
 
 /// Append the `-path-equivalence` flag required by `source_loc`, if any.
@@ -454,20 +479,23 @@ fn push_source_mounts(mounts: &mut Vec<Mount>, source_loc: Option<&SourceLocatio
 /// Run `llvm-cov report` and return the text output.
 fn run_report(
     profdata: &Path,
-    binary: &Path,
+    binaries: &[PathBuf],
     runner: &CoverageRunner,
     source_loc: Option<&SourceLocation>,
     coverage_dir: &Path,
 ) -> String {
-    let mut tool_args: Vec<String> = vec![
-        "report".into(),
-        binary.to_string_lossy().into_owned(),
+    if binaries.is_empty() {
+        return "No binaries available for coverage report".to_string();
+    }
+    let mut tool_args: Vec<String> = vec!["report".into()];
+    push_binary_args(&mut tool_args, binaries);
+    tool_args.extend([
         "-instr-profile".into(),
         profdata.to_string_lossy().into_owned(),
         "-use-color=false".into(),
-    ];
+    ]);
     push_source_flag(&mut tool_args, source_loc);
-    let mut mounts = coverage_mounts(coverage_dir, binary);
+    let mut mounts = coverage_mounts(coverage_dir, binaries);
     push_source_mounts(&mut mounts, source_loc);
     match runner.command("llvm-cov", &tool_args, &mounts).output() {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
@@ -535,24 +563,29 @@ fn parse_unreadable_sources(stderr: &str) -> Vec<String> {
 /// matches the requested file from the full output.
 fn run_show(
     profdata: &Path,
-    binary: &Path,
+    binaries: &[PathBuf],
     source_file: Option<&Path>,
     runner: &CoverageRunner,
     source_loc: Option<&SourceLocation>,
     coverage_dir: &Path,
 ) -> Result<ShowOutcome, String> {
+    if binaries.is_empty() {
+        return Err("No binaries available for coverage show".to_string());
+    }
     let mut tool_args: Vec<String> = vec![
         "show".into(),
         "-instr-profile".into(),
         profdata.to_string_lossy().into_owned(),
-        binary.to_string_lossy().into_owned(),
+    ];
+    push_binary_args(&mut tool_args, binaries);
+    tool_args.extend([
         "-format=text".into(),
         "-show-line-counts-or-regions".into(),
         "-use-color=false".into(),
-    ];
+    ]);
     push_source_flag(&mut tool_args, source_loc);
 
-    let mut mounts = coverage_mounts(coverage_dir, binary);
+    let mut mounts = coverage_mounts(coverage_dir, binaries);
     push_source_mounts(&mut mounts, source_loc);
 
     debug!("llvm-cov show tool_args: {:?}", tool_args);
@@ -1003,15 +1036,10 @@ pub fn analyze_coverage(
             Err(e) => return e,
         };
 
-    let embedded = embedded_source_paths(&profdata, &binary, runner, coverage_dir);
+    let bins = std::slice::from_ref(&binary);
+    let embedded = embedded_source_paths(&profdata, bins, runner, coverage_dir);
     let source_loc = locate_sources(&embedded, binary_path);
-    let report = run_report(
-        &profdata,
-        &binary,
-        runner,
-        source_loc.as_ref(),
-        coverage_dir,
-    );
+    let report = run_report(&profdata, bins, runner, source_loc.as_ref(), coverage_dir);
 
     let mut result = format!("Coverage Analysis for: {}\n", binary_path.display());
     result.push_str(&format!("Coverage Directory: {}\n", coverage_dir.display()));
@@ -1039,12 +1067,13 @@ pub fn get_file_coverage(
             Err(e) => return e,
         };
 
-    let embedded = embedded_source_paths(&profdata, &binary, runner, coverage_dir);
+    let bins = std::slice::from_ref(&binary);
+    let embedded = embedded_source_paths(&profdata, bins, runner, coverage_dir);
     let source_loc = locate_sources(&embedded, binary_path);
 
     let unreadable = match run_show(
         &profdata,
-        &binary,
+        bins,
         file_path,
         runner,
         source_loc.as_ref(),
@@ -1060,7 +1089,98 @@ pub fn get_file_coverage(
         "No annotated source for {file_path:?} (binary={binary:?}, sources={source_loc:?}); \
          llvm-cov could not read {unreadable:?}; falling back to region-level coverage"
     );
-    let export = export_json(&profdata, &binary, runner, coverage_dir, false);
+    let export = export_json(&profdata, bins, runner, coverage_dir, false);
+    render_missing_source_view(file_path, export.as_ref())
+}
+
+// --- Project-wide coverage helpers ---
+
+/// Locate sources by trying each binary path in turn.
+fn locate_sources_multi(embedded_paths: &[String], binary_paths: &[PathBuf]) -> Option<SourceLocation> {
+    if embedded_paths.is_empty() {
+        return None;
+    }
+    for binary_path in binary_paths {
+        if let Some(loc) = locate_sources(embedded_paths, binary_path) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+/// Project-wide coverage summary (merge all tasks, multi-object report).
+///
+/// `binaries` are the instrumented copies used as `-object` for `llvm-cov`.
+/// `original_paths` are the original task binary paths used by
+/// `locate_sources` to find the source tree via path-equivalence.
+pub fn analyze_project_coverage(
+    coverage_dir: &Path,
+    profraw_paths: &[&Path],
+    binaries: &[PathBuf],
+    original_paths: &[PathBuf],
+    runner: &CoverageRunner,
+) -> String {
+    let profdata_out = coverage_dir.join("project.profdata");
+    let profdata = match merge_profdata(profraw_paths, &profdata_out, coverage_dir, runner) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    let embedded = embedded_source_paths(&profdata, binaries, runner, coverage_dir);
+    let source_loc = locate_sources_multi(&embedded, original_paths);
+    let report = run_report(&profdata, binaries, runner, source_loc.as_ref(), coverage_dir);
+
+    let mut result = format!(
+        "Project Coverage ({} fuzzer{})\n",
+        binaries.len(),
+        if binaries.len() == 1 { "" } else { "s" }
+    );
+    result.push_str(&format!("Coverage Directory: {}\n", coverage_dir.display()));
+    result.push_str(&format!("Profile: {}\n\n", profdata.display()));
+    result.push_str(&report);
+    result
+}
+
+/// Project-wide line-by-line file coverage with missing-source fallback.
+///
+/// `binaries` are the instrumented copies for `llvm-cov`.
+/// `original_paths` are the original task binary paths used to locate sources.
+pub fn get_project_file_coverage(
+    coverage_dir: &Path,
+    profraw_paths: &[&Path],
+    binaries: &[PathBuf],
+    original_paths: &[PathBuf],
+    file_path: Option<&Path>,
+    runner: &CoverageRunner,
+) -> String {
+    let profdata_out = coverage_dir.join("project.profdata");
+    let profdata = match merge_profdata(profraw_paths, &profdata_out, coverage_dir, runner) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    let embedded = embedded_source_paths(&profdata, binaries, runner, coverage_dir);
+    let source_loc = locate_sources_multi(&embedded, original_paths);
+
+    let unreadable = match run_show(
+        &profdata,
+        binaries,
+        file_path,
+        runner,
+        source_loc.as_ref(),
+        coverage_dir,
+    ) {
+        Ok(ShowOutcome::Annotated(s)) if !s.trim().is_empty() => return s,
+        Ok(ShowOutcome::Annotated(_)) => Vec::new(),
+        Ok(ShowOutcome::NoSource(paths)) => paths,
+        Err(e) => return e,
+    };
+
+    warn!(
+        "No annotated source for {file_path:?} (project coverage); \
+         llvm-cov could not read {unreadable:?}; falling back to region-level coverage"
+    );
+    let export = export_json(&profdata, binaries, runner, coverage_dir, false);
     render_missing_source_view(file_path, export.as_ref())
 }
 
@@ -1186,8 +1306,8 @@ mod tests {
     #[test]
     fn coverage_mounts_binary_inside_coverage_dir() {
         let coverage_dir = Path::new("/data/coverage/fuzzer1");
-        let binary = Path::new("/data/coverage/fuzzer1/fuzzer_abc.bin");
-        let mounts = coverage_mounts(coverage_dir, binary);
+        let binaries = vec![PathBuf::from("/data/coverage/fuzzer1/fuzzer_abc.bin")];
+        let mounts = coverage_mounts(coverage_dir, &binaries);
         assert_eq!(
             mounts.len(),
             1,
@@ -1200,8 +1320,8 @@ mod tests {
     #[test]
     fn coverage_mounts_binary_outside_coverage_dir() {
         let coverage_dir = Path::new("/data/coverage/fuzzer1");
-        let binary = Path::new("/opt/targets/fuzzer1");
-        let mounts = coverage_mounts(coverage_dir, binary);
+        let binaries = vec![PathBuf::from("/opt/targets/fuzzer1")];
+        let mounts = coverage_mounts(coverage_dir, &binaries);
         assert_eq!(mounts.len(), 2);
         assert_eq!(mounts[1].host_path, PathBuf::from("/opt/targets"));
         assert!(mounts[1].read_only);
@@ -1385,5 +1505,62 @@ mod tests {
         let view = render_missing_source_view(Some(Path::new("/build/src/parser.c")), None);
         assert!(view.starts_with(COVERAGE_SOURCE_UNAVAILABLE_MARKER));
         assert!(view.contains("No region data available"));
+    }
+
+    #[test]
+    fn merge_profdata_empty_input_returns_error() {
+        let runner = CoverageRunner::Host {
+            llvm_bin_dir: None,
+        };
+        let result = merge_profdata(&[], Path::new("/tmp/out.profdata"), Path::new("/tmp"), &runner);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("No profraw files available"));
+    }
+
+    #[test]
+    fn coverage_mounts_multi_deduplicates_coverage_dir() {
+        let coverage_dir = Path::new("/data/coverage");
+        let binaries = vec![
+            PathBuf::from("/data/coverage/fuzzer_a/fuzzer_a.bin"),
+            PathBuf::from("/data/coverage/fuzzer_b/fuzzer_b.bin"),
+        ];
+        let mounts = coverage_mounts(coverage_dir, &binaries);
+        assert_eq!(mounts.len(), 1, "all binaries are under coverage_dir");
+        assert_eq!(mounts[0].host_path, PathBuf::from("/data/coverage"));
+    }
+
+    #[test]
+    fn coverage_mounts_multi_adds_external_binary_dirs() {
+        let coverage_dir = Path::new("/data/coverage");
+        let binaries = vec![
+            PathBuf::from("/data/coverage/fuzzer_a.bin"),
+            PathBuf::from("/opt/targets/fuzzer_b"),
+        ];
+        let mounts = coverage_mounts(coverage_dir, &binaries);
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[1].host_path, PathBuf::from("/opt/targets"));
+        assert!(mounts[1].read_only);
+    }
+
+    #[test]
+    fn locate_sources_multi_tries_each_binary() {
+        let tmp = assert_fs::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("parser.c"), "int x;\n").unwrap();
+        let binary = tmp.path().join("fuzzer");
+        let other = PathBuf::from("/nonexistent/bin/fuzzer2");
+
+        let embedded = vec!["/build/elsewhere/parser.c".to_string()];
+        let loc = locate_sources_multi(&embedded, &[other, binary])
+            .expect("should find via second binary");
+        assert!(loc.flag.is_some());
+    }
+
+    #[test]
+    fn locate_sources_multi_none_when_no_match() {
+        let embedded = vec!["/build/gone/parser.c".to_string()];
+        let binaries = vec![PathBuf::from("/nonexistent/a"), PathBuf::from("/nonexistent/b")];
+        assert!(locate_sources_multi(&embedded, &binaries).is_none());
     }
 }
