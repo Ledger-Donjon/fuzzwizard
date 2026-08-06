@@ -1180,6 +1180,75 @@ pub fn get_project_file_coverage(
     render_missing_source_view(file_path, export.as_ref())
 }
 
+// --- Structured coverage summary for persistence ---
+
+/// A single coverage metric (engine-agnostic).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CoverageMetricEntry {
+    pub metric_name: String,
+    pub covered: i32,
+    pub total: i32,
+}
+
+/// Aggregated coverage summary ready to be sent to the backend.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CoverageSummary {
+    pub metrics: Vec<CoverageMetricEntry>,
+}
+
+/// Extract structured coverage metrics from `llvm-cov export --summary-only` JSON.
+///
+/// The LLVM JSON format has `data[0].totals.{lines,functions,regions,branches}` each
+/// with `count` and `covered` fields. We map these to our universal metric model.
+pub fn extract_summary_metrics(json: &serde_json::Value) -> Option<CoverageSummary> {
+    let totals = json
+        .get("data")?
+        .as_array()?
+        .first()?
+        .get("totals")?;
+
+    let mut metrics = Vec::new();
+
+    for metric_name in &["lines", "functions", "regions", "branches"] {
+        if let Some(section) = totals.get(*metric_name) {
+            let covered = section.get("covered").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let total = section.get("count").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            if total > 0 {
+                metrics.push(CoverageMetricEntry {
+                    metric_name: metric_name.to_string(),
+                    covered,
+                    total,
+                });
+            }
+        }
+    }
+
+    if metrics.is_empty() {
+        return None;
+    }
+
+    Some(CoverageSummary { metrics })
+}
+
+/// Compute a project-wide structured coverage summary by merging all profraw files.
+///
+/// Returns `None` if coverage data is unavailable or cannot be parsed.
+pub fn compute_project_summary(
+    coverage_dir: &Path,
+    profraw_paths: &[&Path],
+    binaries: &[PathBuf],
+    runner: &CoverageRunner,
+) -> Option<CoverageSummary> {
+    if profraw_paths.is_empty() || binaries.is_empty() {
+        return None;
+    }
+
+    let profdata_out = coverage_dir.join("snapshot.profdata");
+    let profdata = merge_profdata(profraw_paths, &profdata_out, coverage_dir, runner).ok()?;
+    let json = export_json(&profdata, binaries, runner, coverage_dir, true)?;
+    extract_summary_metrics(&json)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1558,5 +1627,59 @@ mod tests {
         let embedded = vec!["/build/gone/parser.c".to_string()];
         let binaries = vec![PathBuf::from("/nonexistent/a"), PathBuf::from("/nonexistent/b")];
         assert!(locate_sources_multi(&embedded, &binaries).is_none());
+    }
+
+    #[test]
+    fn extract_summary_metrics_full_payload() {
+        let json: serde_json::Value = serde_json::json!({
+            "data": [{
+                "totals": {
+                    "lines": {"count": 100, "covered": 75},
+                    "functions": {"count": 20, "covered": 15},
+                    "regions": {"count": 50, "covered": 30},
+                    "branches": {"count": 40, "covered": 10}
+                }
+            }]
+        });
+        let summary = extract_summary_metrics(&json).unwrap();
+        assert_eq!(summary.metrics.len(), 4);
+        let lines = summary.metrics.iter().find(|m| m.metric_name == "lines").unwrap();
+        assert_eq!(lines.covered, 75);
+        assert_eq!(lines.total, 100);
+        let branches = summary.metrics.iter().find(|m| m.metric_name == "branches").unwrap();
+        assert_eq!(branches.covered, 10);
+        assert_eq!(branches.total, 40);
+    }
+
+    #[test]
+    fn extract_summary_metrics_partial_payload() {
+        let json: serde_json::Value = serde_json::json!({
+            "data": [{
+                "totals": {
+                    "lines": {"count": 50, "covered": 25},
+                    "functions": {"count": 10, "covered": 8}
+                }
+            }]
+        });
+        let summary = extract_summary_metrics(&json).unwrap();
+        assert_eq!(summary.metrics.len(), 2);
+    }
+
+    #[test]
+    fn extract_summary_metrics_empty_totals() {
+        let json: serde_json::Value = serde_json::json!({
+            "data": [{
+                "totals": {
+                    "lines": {"count": 0, "covered": 0}
+                }
+            }]
+        });
+        assert!(extract_summary_metrics(&json).is_none());
+    }
+
+    #[test]
+    fn extract_summary_metrics_missing_data() {
+        let json: serde_json::Value = serde_json::json!({"version": "1.0"});
+        assert!(extract_summary_metrics(&json).is_none());
     }
 }

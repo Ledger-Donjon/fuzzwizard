@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: © 2026 LEDGER SAS
 // SPDX-License-Identifier: MIT
 
-use crate::schema::{admin_events, crashes};
+use crate::schema::{admin_events, coverage_metrics, coverage_snapshots, crashes};
 use axum::{
     extract::{DefaultBodyLimit, Query, State},
     http::StatusCode,
@@ -97,6 +97,22 @@ async fn main() {
         .route(
             "/admin_events/{id}/mark_processed",
             post(mark_admin_event_processed),
+        )
+        .route(
+            "/coverage_snapshots",
+            post(create_coverage_snapshot).get(get_coverage_snapshots),
+        )
+        .route(
+            "/coverage_snapshots/latest",
+            get(get_latest_coverage_snapshot),
+        )
+        .route(
+            "/maintenance/preview",
+            post(maintenance_preview),
+        )
+        .route(
+            "/maintenance/delete",
+            post(maintenance_delete),
         )
         .layer(DefaultBodyLimit::max(110 * 1024 * 1024))
         .with_state(pool);
@@ -601,4 +617,450 @@ async fn get_crash_ids(
         .collect();
 
     Ok(Json(crash_ids))
+}
+
+// --- Coverage Snapshots ---
+
+#[derive(Deserialize, Serialize)]
+struct CreateCoverageSnapshot {
+    scheduler_name: String,
+    fuzzer_engine: String,
+    build_fingerprint: String,
+    num_fuzzers: i32,
+    metrics: Vec<CoverageMetricInput>,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+struct CoverageMetricInput {
+    metric_name: String,
+    covered: i32,
+    total: i32,
+}
+
+#[derive(Serialize, Queryable, Selectable)]
+#[diesel(table_name = coverage_snapshots)]
+struct CoverageSnapshot {
+    id: i32,
+    scheduler_name: String,
+    fuzzer_engine: String,
+    build_fingerprint: String,
+    num_fuzzers: i32,
+    captured_at: NaiveDateTime,
+    schema_version: i32,
+}
+
+#[derive(Serialize, Queryable, Selectable)]
+#[diesel(table_name = coverage_metrics)]
+struct CoverageMetric {
+    id: i32,
+    snapshot_id: i32,
+    metric_name: String,
+    covered: i32,
+    total: i32,
+}
+
+#[derive(Serialize)]
+struct CoverageSnapshotWithMetrics {
+    #[serde(flatten)]
+    snapshot: CoverageSnapshot,
+    metrics: Vec<CoverageMetric>,
+}
+
+async fn create_coverage_snapshot(
+    State(pool): State<DbPool>,
+    Json(payload): Json<CreateCoverageSnapshot>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if payload.scheduler_name.is_empty() || payload.scheduler_name.len() > 256 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid scheduler_name".to_string(),
+        ));
+    }
+    if payload.fuzzer_engine.is_empty() || payload.fuzzer_engine.len() > 64 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid fuzzer_engine".to_string(),
+        ));
+    }
+    if payload.build_fingerprint.is_empty() || payload.build_fingerprint.len() > 4096 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid build_fingerprint".to_string(),
+        ));
+    }
+    if payload.metrics.len() > 20 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Too many metrics (max 20)".to_string(),
+        ));
+    }
+    for m in &payload.metrics {
+        if m.total < 0 || m.covered < 0 || m.covered > m.total {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Invalid metric values for '{}'", m.metric_name),
+            ));
+        }
+    }
+
+    let mut conn = pool.get().map_err(|e| {
+        error!("Failed to get DB connection: {e}");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Database unavailable".to_string(),
+        )
+    })?;
+
+    // Deduplicate: skip if last snapshot for this scheduler has the same fingerprint
+    let existing = coverage_snapshots::table
+        .filter(coverage_snapshots::scheduler_name.eq(&payload.scheduler_name))
+        .filter(coverage_snapshots::build_fingerprint.eq(&payload.build_fingerprint))
+        .order(coverage_snapshots::captured_at.desc())
+        .select(coverage_snapshots::id)
+        .first::<i32>(&mut conn)
+        .optional()
+        .map_err(|e| {
+            error!("Dedup query failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Database error".to_string(),
+            )
+        })?;
+
+    if existing.is_some() {
+        return Ok(StatusCode::OK);
+    }
+
+    let snapshot_id: i32 = diesel::insert_into(coverage_snapshots::table)
+        .values((
+            coverage_snapshots::scheduler_name.eq(&payload.scheduler_name),
+            coverage_snapshots::fuzzer_engine.eq(&payload.fuzzer_engine),
+            coverage_snapshots::build_fingerprint.eq(&payload.build_fingerprint),
+            coverage_snapshots::num_fuzzers.eq(payload.num_fuzzers),
+        ))
+        .returning(coverage_snapshots::id)
+        .get_result(&mut conn)
+        .map_err(|e| {
+            error!("Failed to insert coverage snapshot: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Database error".to_string(),
+            )
+        })?;
+
+    for m in &payload.metrics {
+        diesel::insert_into(coverage_metrics::table)
+            .values((
+                coverage_metrics::snapshot_id.eq(snapshot_id),
+                coverage_metrics::metric_name.eq(&m.metric_name),
+                coverage_metrics::covered.eq(m.covered),
+                coverage_metrics::total.eq(m.total),
+            ))
+            .execute(&mut conn)
+            .map_err(|e| {
+                error!("Failed to insert coverage metric: {e}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Database error".to_string(),
+                )
+            })?;
+    }
+
+    info!("Coverage snapshot created id={snapshot_id} for scheduler={}", payload.scheduler_name);
+    Ok(StatusCode::CREATED)
+}
+
+async fn get_coverage_snapshots(
+    State(pool): State<DbPool>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<CoverageSnapshotWithMetrics>>, StatusCode> {
+    let mut conn = pool.get().map_err(|e| {
+        error!("Failed to get DB connection: {e}");
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
+
+    let mut query = coverage_snapshots::table
+        .select(CoverageSnapshot::as_select())
+        .into_boxed();
+
+    if let Some(scheduler) = params.get("scheduler") {
+        query = query.filter(coverage_snapshots::scheduler_name.eq(scheduler));
+    }
+    if let Some(after) = params.get("after") {
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(after, "%Y-%m-%d %H:%M:%S%.f") {
+            query = query.filter(coverage_snapshots::captured_at.gt(dt));
+        } else {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+    if let Some(before) = params.get("before") {
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(before, "%Y-%m-%d %H:%M:%S%.f") {
+            query = query.filter(coverage_snapshots::captured_at.lt(dt));
+        } else {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+
+    let limit: i64 = params
+        .get("limit")
+        .and_then(|l| l.parse().ok())
+        .unwrap_or(100);
+
+    let snapshots = query
+        .order(coverage_snapshots::captured_at.desc())
+        .limit(limit)
+        .get_results::<CoverageSnapshot>(&mut conn)
+        .map_err(|e| {
+            error!("Database query failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let snapshot_ids: Vec<i32> = snapshots.iter().map(|s| s.id).collect();
+    let all_metrics = coverage_metrics::table
+        .filter(coverage_metrics::snapshot_id.eq_any(&snapshot_ids))
+        .select(CoverageMetric::as_select())
+        .get_results::<CoverageMetric>(&mut conn)
+        .map_err(|e| {
+            error!("Database query failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let mut metrics_map: HashMap<i32, Vec<CoverageMetric>> = HashMap::new();
+    for m in all_metrics {
+        metrics_map.entry(m.snapshot_id).or_default().push(m);
+    }
+
+    let result: Vec<CoverageSnapshotWithMetrics> = snapshots
+        .into_iter()
+        .map(|s| {
+            let metrics = metrics_map.remove(&s.id).unwrap_or_default();
+            CoverageSnapshotWithMetrics { snapshot: s, metrics }
+        })
+        .collect();
+
+    Ok(Json(result))
+}
+
+async fn get_latest_coverage_snapshot(
+    State(pool): State<DbPool>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<CoverageSnapshotWithMetrics>, StatusCode> {
+    let mut conn = pool.get().map_err(|e| {
+        error!("Failed to get DB connection: {e}");
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
+
+    let mut query = coverage_snapshots::table
+        .select(CoverageSnapshot::as_select())
+        .into_boxed();
+
+    if let Some(scheduler) = params.get("scheduler") {
+        query = query.filter(coverage_snapshots::scheduler_name.eq(scheduler));
+    }
+
+    let snapshot = query
+        .order(coverage_snapshots::captured_at.desc())
+        .first::<CoverageSnapshot>(&mut conn)
+        .map_err(|e| match e {
+            diesel::result::Error::NotFound => StatusCode::NOT_FOUND,
+            _ => {
+                error!("Database query failed: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        })?;
+
+    let metrics = coverage_metrics::table
+        .filter(coverage_metrics::snapshot_id.eq(snapshot.id))
+        .select(CoverageMetric::as_select())
+        .get_results::<CoverageMetric>(&mut conn)
+        .map_err(|e| {
+            error!("Database query failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(CoverageSnapshotWithMetrics { snapshot, metrics }))
+}
+
+// --- Maintenance (cleanup) ---
+
+#[derive(Deserialize)]
+struct MaintenanceRequest {
+    #[serde(default)]
+    crashes_before: Option<String>,
+    #[serde(default)]
+    admin_events_before: Option<String>,
+    #[serde(default)]
+    coverage_before: Option<String>,
+}
+
+#[derive(Serialize)]
+struct MaintenancePreviewResponse {
+    crashes_count: i64,
+    admin_events_count: i64,
+    coverage_snapshots_count: i64,
+}
+
+fn parse_maintenance_date(s: &str) -> Option<NaiveDateTime> {
+    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+        .or_else(|_| {
+            chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .map(|d| d.and_hms_opt(0, 0, 0).unwrap())
+        })
+        .ok()
+}
+
+async fn maintenance_preview(
+    State(pool): State<DbPool>,
+    Json(req): Json<MaintenanceRequest>,
+) -> Result<Json<MaintenancePreviewResponse>, (StatusCode, String)> {
+    let mut conn = pool.get().map_err(|e| {
+        error!("Failed to get DB connection: {e}");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Database unavailable".to_string(),
+        )
+    })?;
+
+    let crashes_count = if let Some(ref before_str) = req.crashes_before {
+        let dt = parse_maintenance_date(before_str).ok_or_else(|| {
+            (StatusCode::BAD_REQUEST, "Invalid crashes_before date".to_string())
+        })?;
+        crashes::table
+            .filter(crashes::created_at.lt(dt))
+            .count()
+            .get_result::<i64>(&mut conn)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    let admin_events_count = if let Some(ref before_str) = req.admin_events_before {
+        let dt = parse_maintenance_date(before_str).ok_or_else(|| {
+            (StatusCode::BAD_REQUEST, "Invalid admin_events_before date".to_string())
+        })?;
+        admin_events::table
+            .filter(admin_events::created_at.lt(dt))
+            .filter(admin_events::processed.eq(true))
+            .count()
+            .get_result::<i64>(&mut conn)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    let coverage_snapshots_count = if let Some(ref before_str) = req.coverage_before {
+        let dt = parse_maintenance_date(before_str).ok_or_else(|| {
+            (StatusCode::BAD_REQUEST, "Invalid coverage_before date".to_string())
+        })?;
+        coverage_snapshots::table
+            .filter(coverage_snapshots::captured_at.lt(dt))
+            .count()
+            .get_result::<i64>(&mut conn)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    Ok(Json(MaintenancePreviewResponse {
+        crashes_count,
+        admin_events_count,
+        coverage_snapshots_count,
+    }))
+}
+
+const BATCH_SIZE: i64 = 500;
+
+async fn maintenance_delete(
+    State(pool): State<DbPool>,
+    Json(req): Json<MaintenanceRequest>,
+) -> Result<Json<MaintenancePreviewResponse>, (StatusCode, String)> {
+    let mut conn = pool.get().map_err(|e| {
+        error!("Failed to get DB connection: {e}");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Database unavailable".to_string(),
+        )
+    })?;
+
+    let mut total_crashes: i64 = 0;
+    if let Some(ref before_str) = req.crashes_before {
+        let dt = parse_maintenance_date(before_str).ok_or_else(|| {
+            (StatusCode::BAD_REQUEST, "Invalid crashes_before date".to_string())
+        })?;
+        loop {
+            let ids: Vec<i32> = crashes::table
+                .filter(crashes::created_at.lt(dt))
+                .select(crashes::id)
+                .limit(BATCH_SIZE)
+                .get_results(&mut conn)
+                .unwrap_or_default();
+            if ids.is_empty() {
+                break;
+            }
+            let deleted = diesel::delete(crashes::table.filter(crashes::id.eq_any(&ids)))
+                .execute(&mut conn)
+                .unwrap_or(0);
+            total_crashes += deleted as i64;
+        }
+    }
+
+    let mut total_admin_events: i64 = 0;
+    if let Some(ref before_str) = req.admin_events_before {
+        let dt = parse_maintenance_date(before_str).ok_or_else(|| {
+            (StatusCode::BAD_REQUEST, "Invalid admin_events_before date".to_string())
+        })?;
+        loop {
+            let ids: Vec<i32> = admin_events::table
+                .filter(admin_events::created_at.lt(dt))
+                .filter(admin_events::processed.eq(true))
+                .select(admin_events::id)
+                .limit(BATCH_SIZE)
+                .get_results(&mut conn)
+                .unwrap_or_default();
+            if ids.is_empty() {
+                break;
+            }
+            let deleted =
+                diesel::delete(admin_events::table.filter(admin_events::id.eq_any(&ids)))
+                    .execute(&mut conn)
+                    .unwrap_or(0);
+            total_admin_events += deleted as i64;
+        }
+    }
+
+    let mut total_coverage: i64 = 0;
+    if let Some(ref before_str) = req.coverage_before {
+        let dt = parse_maintenance_date(before_str).ok_or_else(|| {
+            (StatusCode::BAD_REQUEST, "Invalid coverage_before date".to_string())
+        })?;
+        loop {
+            let ids: Vec<i32> = coverage_snapshots::table
+                .filter(coverage_snapshots::captured_at.lt(dt))
+                .select(coverage_snapshots::id)
+                .limit(BATCH_SIZE)
+                .get_results(&mut conn)
+                .unwrap_or_default();
+            if ids.is_empty() {
+                break;
+            }
+            // Metrics are cascade-deleted
+            let deleted = diesel::delete(
+                coverage_snapshots::table.filter(coverage_snapshots::id.eq_any(&ids)),
+            )
+            .execute(&mut conn)
+            .unwrap_or(0);
+            total_coverage += deleted as i64;
+        }
+    }
+
+    info!(
+        "Maintenance complete: deleted {} crashes, {} admin_events, {} coverage_snapshots",
+        total_crashes, total_admin_events, total_coverage
+    );
+
+    Ok(Json(MaintenancePreviewResponse {
+        crashes_count: total_crashes,
+        admin_events_count: total_admin_events,
+        coverage_snapshots_count: total_coverage,
+    }))
 }

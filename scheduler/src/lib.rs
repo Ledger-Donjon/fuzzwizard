@@ -112,6 +112,7 @@ pub type Result<T> = std::result::Result<T, SchedulerError>;
 mod coverage;
 
 pub use coverage::COVERAGE_SOURCE_UNAVAILABLE_MARKER;
+pub use coverage::{CoverageMetricEntry, CoverageSummary};
 
 /// Security validation module for input sanitization
 pub mod validation {
@@ -1203,6 +1204,11 @@ impl<C: TargetsCollector> Scheduler<C> {
         log_targets("CHECK", &targets_to_check, &self.targets);
         log_targets("START", &targets_to_start, &latest_targets);
 
+        // Capture coverage snapshot before transitioning binaries (fingerprint change)
+        if !targets_to_stop.is_empty() || !targets_to_start.is_empty() {
+            self.snapshot_coverage_before_transition(&old_targets_sha);
+        }
+
         for target in targets_to_stop {
             info!("stopping task: {target:x?}");
             if let Some(mut task) = self.tasks.remove(&target) {
@@ -2027,6 +2033,84 @@ impl<C: TargetsCollector> Scheduler<C> {
             file_path,
             &runner,
         )
+    }
+
+    /// Compute a canonical fingerprint for the current set of target binaries.
+    ///
+    /// The fingerprint is the sorted hex-encoded SHA3-256 hashes joined by `:`.
+    fn compute_build_fingerprint(shas: &HashSet<Sha>) -> String {
+        let mut sorted: Vec<String> = shas.iter().map(hex::encode).collect();
+        sorted.sort();
+        sorted.join(":")
+    }
+
+    /// Capture and send a coverage snapshot to the backend.
+    ///
+    /// Called before binary transitions (stop/start) when the set of targets is
+    /// about to change. Silently does nothing when coverage is disabled, tools
+    /// are unavailable, or the profile data cannot be computed.
+    fn snapshot_coverage_before_transition(&self, outgoing_shas: &HashSet<Sha>) {
+        if !self.has_coverage || self.tasks.is_empty() {
+            return;
+        }
+
+        let runner = match self.coverage_runner() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        let (profraw_paths, binaries, _) = self.collect_project_coverage_inputs();
+        let profraw_refs: Vec<&Path> = profraw_paths.iter().map(|p| p.as_path()).collect();
+
+        let summary = match coverage::compute_project_summary(
+            &self.coverage_directory,
+            &profraw_refs,
+            &binaries,
+            &runner,
+        ) {
+            Some(s) => s,
+            None => return,
+        };
+
+        let fingerprint = Self::compute_build_fingerprint(outgoing_shas);
+
+        #[derive(serde::Serialize)]
+        struct SnapshotPayload {
+            scheduler_name: String,
+            fuzzer_engine: String,
+            build_fingerprint: String,
+            num_fuzzers: i32,
+            metrics: Vec<coverage::CoverageMetricEntry>,
+        }
+
+        let payload = SnapshotPayload {
+            scheduler_name: self.scheduler_name.clone(),
+            fuzzer_engine: "libfuzzer".to_string(),
+            build_fingerprint: fingerprint,
+            num_fuzzers: self.tasks.len() as i32,
+            metrics: summary.metrics,
+        };
+
+        let url = format!("{}/coverage_snapshots", self.backend_url);
+        match reqwest::blocking::Client::new()
+            .post(&url)
+            .json(&payload)
+            .timeout(Duration::from_secs(10))
+            .send()
+        {
+            Ok(resp) if resp.status().is_success() => {
+                info!("Coverage snapshot sent to backend for scheduler={}", self.scheduler_name);
+            }
+            Ok(resp) => {
+                debug!(
+                    "Coverage snapshot rejected by backend: {}",
+                    resp.status()
+                );
+            }
+            Err(e) => {
+                debug!("Failed to send coverage snapshot: {e}");
+            }
+        }
     }
 
     /// Get coverage for a specific file (or all files) in a task.
