@@ -1,16 +1,30 @@
 // SPDX-FileCopyrightText: © 2026 LEDGER SAS
 // SPDX-License-Identifier: MIT
 
+use std::process::exit;
+use std::time::Duration;
+
 use chrono::{Months, Utc};
 use clap::Parser;
 use dialoguer::Confirm;
 use serde::{Deserialize, Serialize};
 
+/// A maintenance sweep walks whole tables, so the request outlives the usual
+/// request/response round trip by a lot.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+
 #[derive(Parser)]
-#[command(name = "fuzzwizard-cleanup", about = "Interactive maintenance tool for the FuzzWizard backend")]
+#[command(
+    name = "fuzzwizard-cleanup",
+    about = "Interactive maintenance tool for the FuzzWizard backend"
+)]
 struct Cli {
     /// Backend URL (e.g. http://127.0.0.1:3000)
-    #[arg(long, env = "FUZZWIZARD_BACKEND_URL", default_value = "http://127.0.0.1:3000")]
+    #[arg(
+        long,
+        env = "FUZZWIZARD_BACKEND_URL",
+        default_value = "http://127.0.0.1:3000"
+    )]
     backend_url: String,
 
     /// Delete crashes older than this many months (default: 6)
@@ -25,6 +39,11 @@ struct Cli {
     #[arg(long)]
     coverage_before: Option<String>,
 
+    /// Drop the per-file coverage detail older than this many days, keeping the
+    /// aggregated snapshots. Use 0 to keep every file row.
+    #[arg(long, default_value = "30")]
+    coverage_files_days: i64,
+
     /// Skip interactive confirmation (dry-run only shows preview)
     #[arg(long)]
     dry_run: bool,
@@ -38,13 +57,75 @@ struct MaintenanceRequest {
     admin_events_before: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     coverage_before: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage_files_before: Option<String>,
 }
 
+/// Row counts, either about to be deleted (preview) or just deleted.
 #[derive(Deserialize)]
-struct MaintenancePreviewResponse {
+struct MaintenanceCounts {
     crashes_count: i64,
     admin_events_count: i64,
     coverage_snapshots_count: i64,
+    #[serde(default)]
+    coverage_files_count: i64,
+}
+
+impl MaintenanceCounts {
+    fn total(&self) -> i64 {
+        self.crashes_count
+            + self.admin_events_count
+            + self.coverage_snapshots_count
+            + self.coverage_files_count
+    }
+
+    fn print(&self, verb: &str) {
+        for (label, count) in [
+            ("Crashes", self.crashes_count),
+            ("Admin events", self.admin_events_count),
+            ("Coverage snapshots", self.coverage_snapshots_count),
+            ("Coverage file rows", self.coverage_files_count),
+        ] {
+            println!("  {:<32} {count}", format!("{label} {verb}:"));
+        }
+    }
+}
+
+/// Send `request` to a maintenance endpoint, exiting on any failure.
+///
+/// This is a one-shot admin tool: there is nothing useful to do after a failed
+/// preview or a failed deletion but report it and stop.
+fn post_maintenance(
+    client: &reqwest::blocking::Client,
+    backend_url: &str,
+    endpoint: &str,
+    request: &MaintenanceRequest,
+) -> MaintenanceCounts {
+    let url = format!(
+        "{}/maintenance/{endpoint}",
+        backend_url.trim_end_matches('/')
+    );
+
+    let response = client
+        .post(&url)
+        .json(request)
+        .send()
+        .unwrap_or_else(|e| fail(&format!("Error contacting backend at {url}: {e}")));
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().unwrap_or_default();
+        fail(&format!("Error: backend returned status {status} - {body}"));
+    }
+
+    response
+        .json()
+        .unwrap_or_else(|e| fail(&format!("Error parsing response from {url}: {e}")))
+}
+
+fn fail(message: &str) -> ! {
+    eprintln!("{message}");
+    exit(1);
 }
 
 fn main() {
@@ -62,10 +143,18 @@ fn main() {
 
     let coverage_before = cli.coverage_before.clone();
 
+    let coverage_files_before = if cli.coverage_files_days > 0 {
+        now.checked_sub_signed(chrono::Duration::days(cli.coverage_files_days))
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+    } else {
+        None
+    };
+
     let request = MaintenanceRequest {
         crashes_before: crashes_before.clone(),
         admin_events_before: admin_events_before.clone(),
         coverage_before: coverage_before.clone(),
+        coverage_files_before: coverage_files_before.clone(),
     };
 
     println!("=== FuzzWizard Cleanup ===\n");
@@ -85,46 +174,27 @@ fn main() {
     } else {
         println!("Coverage snapshots: not targeted (kept indefinitely)");
     }
+    match coverage_files_before {
+        Some(ref before) => println!(
+            "Coverage per-file detail: delete rows older than {} days (before {}); aggregated snapshots are kept",
+            cli.coverage_files_days, before
+        ),
+        None => println!("Coverage per-file detail: not targeted"),
+    }
     println!();
 
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .unwrap_or_else(|e| fail(&format!("Error building HTTP client: {e}")));
 
     println!("Fetching preview...");
-    let preview_url = format!("{}/maintenance/preview", cli.backend_url);
-    let resp = match client.post(&preview_url).json(&request).send() {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Error contacting backend: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    if !resp.status().is_success() {
-        eprintln!(
-            "Error: Backend returned status {} - {}",
-            resp.status(),
-            resp.text().unwrap_or_default()
-        );
-        std::process::exit(1);
-    }
-
-    let preview: MaintenancePreviewResponse = match resp.json() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Error parsing response: {e}");
-            std::process::exit(1);
-        }
-    };
+    let preview = post_maintenance(&client, &cli.backend_url, "preview", &request);
 
     println!("\n--- Preview ---");
-    println!("  Crashes to delete:            {}", preview.crashes_count);
-    println!("  Admin events to delete:       {}", preview.admin_events_count);
-    println!(
-        "  Coverage snapshots to delete: {}",
-        preview.coverage_snapshots_count
-    );
+    preview.print("to delete");
 
-    let total = preview.crashes_count + preview.admin_events_count + preview.coverage_snapshots_count;
+    let total = preview.total();
     if total == 0 {
         println!("\nNothing to delete.");
         return;
@@ -150,38 +220,9 @@ fn main() {
     }
 
     println!("\nDeleting...");
-    let delete_url = format!("{}/maintenance/delete", cli.backend_url);
-    let resp = match client.post(&delete_url).json(&request).send() {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Error contacting backend: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    if !resp.status().is_success() {
-        eprintln!(
-            "Error: Backend returned status {} - {}",
-            resp.status(),
-            resp.text().unwrap_or_default()
-        );
-        std::process::exit(1);
-    }
-
-    let result: MaintenancePreviewResponse = match resp.json() {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Error parsing response: {e}");
-            std::process::exit(1);
-        }
-    };
+    let deleted = post_maintenance(&client, &cli.backend_url, "delete", &request);
 
     println!("\n--- Deletion Complete ---");
-    println!("  Crashes deleted:            {}", result.crashes_count);
-    println!("  Admin events deleted:       {}", result.admin_events_count);
-    println!(
-        "  Coverage snapshots deleted: {}",
-        result.coverage_snapshots_count
-    );
+    deleted.print("deleted");
     println!("\nDone.");
 }
