@@ -41,6 +41,24 @@ jobs:
     - name: Lint with Clippy
       run: cargo clippy -- -Dwarnings
 
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Setup Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+
+    - name: Install cargo-audit
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-audit
+
+    # Fails on advisories with a known fix. Unmaintained/unsound notices are
+    # reported but do not break the build, as they often have no upgrade path.
+    - name: Audit dependencies against the RustSec advisory database
+      run: cargo audit
+
   sbom:
     runs-on: ubuntu-latest
     steps:
