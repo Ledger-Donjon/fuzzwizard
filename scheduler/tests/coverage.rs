@@ -39,6 +39,7 @@ fn test_collect_coverage_disabled() {
         has_coverage: false,
         llvm_bin_directory: None,
         state_file: None,
+        coverage_snapshot_interval_minutes: None,
     };
 
     let scheduler = Scheduler::new(collector, config, None);
@@ -69,6 +70,7 @@ fn test_collect_coverage_enabled_no_tasks() {
         has_coverage: true,
         llvm_bin_directory: None,
         state_file: None,
+        coverage_snapshot_interval_minutes: None,
     };
 
     let scheduler = Scheduler::new(collector, config, None);
@@ -108,6 +110,7 @@ fn test_collect_coverage_enabled_with_tasks() {
         has_coverage: true,
         llvm_bin_directory: None,
         state_file: None,
+        coverage_snapshot_interval_minutes: None,
     };
 
     let scheduler = Scheduler::new(collector, config, None);
@@ -148,6 +151,7 @@ fn test_collect_coverage_with_container() {
         has_coverage: true,
         llvm_bin_directory: None,
         state_file: None,
+        coverage_snapshot_interval_minutes: None,
     };
 
     let scheduler = Scheduler::new(collector, config, None);
@@ -156,14 +160,12 @@ fn test_collect_coverage_with_container() {
     scheduler.collect_coverage();
 }
 
+/// A scheduler configured for containers but without a container binary cannot
+/// run `llvm-cov` anywhere, and must say so instead of silently reporting no
+/// coverage.
 #[test]
-fn test_get_task_coverage_container_no_binary_returns_error() {
+fn test_coverage_with_container_image_but_no_binary_returns_error() {
     let temp_dir = assert_fs::TempDir::new().unwrap();
-    let test_file = temp_dir.child("test_binary");
-    test_file.write_binary(b"test binary content").unwrap();
-
-    let content = fs::read(test_file.path()).unwrap();
-    let sha: Sha = Sha3_256::digest(&content).into();
 
     let collector = MockCollector {
         targets: HashMap::new(),
@@ -183,11 +185,12 @@ fn test_get_task_coverage_container_no_binary_returns_error() {
         has_coverage: true,
         llvm_bin_directory: None,
         state_file: None,
+        coverage_snapshot_interval_minutes: None,
     };
 
     let scheduler = Scheduler::new(collector, config, None);
 
-    let result = scheduler.get_task_coverage(&sha);
+    let result = scheduler.get_project_coverage();
     assert!(
         result.contains("container_binary"),
         "expected error about missing container_binary, got: {result}"

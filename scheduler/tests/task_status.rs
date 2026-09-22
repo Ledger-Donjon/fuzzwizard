@@ -39,6 +39,7 @@ fn test_get_tasks_with_status_empty() {
         has_coverage: false,
         llvm_bin_directory: None,
         state_file: None,
+        coverage_snapshot_interval_minutes: None,
     };
 
     let mut scheduler = Scheduler::new(collector, config, None);
@@ -78,6 +79,7 @@ fn test_get_tasks_with_status_after_update() {
         has_coverage: false,
         llvm_bin_directory: None,
         state_file: None,
+        coverage_snapshot_interval_minutes: None,
     };
 
     let mut scheduler = Scheduler::new(collector, config, None);
@@ -118,6 +120,7 @@ fn test_log_running_tasks_empty() {
         has_coverage: false,
         llvm_bin_directory: None,
         state_file: None,
+        coverage_snapshot_interval_minutes: None,
     };
 
     let scheduler = Scheduler::new(collector, config, None);
@@ -157,6 +160,7 @@ fn test_task_status_info_fields() {
         has_coverage: false,
         llvm_bin_directory: None,
         state_file: None,
+        coverage_snapshot_interval_minutes: None,
     };
 
     let mut scheduler = Scheduler::new(collector, config, None);
