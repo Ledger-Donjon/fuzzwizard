@@ -8,8 +8,8 @@ use std::thread;
 
 use log::info;
 
-use super::App;
 use super::types::*;
+use super::App;
 
 impl App {
     /// Returns the currently selected task for the given scheduler tab, or None.

@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::thread;
 use std::time::Instant;
-use std::{thread};
 
 use log::{debug, info, warn};
 use sha3::{Digest, Sha3_256};
@@ -21,7 +21,7 @@ use crate::coverage;
 use crate::process::{flush_coverage, fuzzer_name_of, resolve_profraw_paths};
 use crate::types::{Task, TaskStatus};
 use crate::{validation, Scheduler, TargetsCollector};
-use crate::{COVERAGE_FLUSH_TIMEOUT, FIRST_SNAPSHOT_DELAY, SNAPSHOT_PROFDATA, PROJECT_PROFDATA};
+use crate::{COVERAGE_FLUSH_TIMEOUT, FIRST_SNAPSHOT_DELAY, PROJECT_PROFDATA, SNAPSHOT_PROFDATA};
 
 impl<C: TargetsCollector> Scheduler<C> {
     pub fn collect_coverage(&self) {

@@ -108,7 +108,10 @@ async fn main() {
         .route("/fuzzer_status", post(report::report_fuzzer_status))
         .route("/report", get(report::get_report))
         .route("/report/html", get(report::get_report_html))
-        .route("/maintenance/preview", post(maintenance::maintenance_preview))
+        .route(
+            "/maintenance/preview",
+            post(maintenance::maintenance_preview),
+        )
         .route("/maintenance/delete", post(maintenance::maintenance_delete))
         .layer(DefaultBodyLimit::max(110 * 1024 * 1024))
         // Outermost layer, so a panic in any handler answers 500 and takes down

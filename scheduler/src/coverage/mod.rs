@@ -20,9 +20,7 @@ pub use summary::{
     extract_summary_metrics, CoverageFileEntry, CoverageMetricEntry, CoverageSummary,
 };
 
-use llvm::{
-    embedded_source_paths, export_json, merge_profdata, run_report, run_show, ShowOutcome,
-};
+use llvm::{embedded_source_paths, export_json, merge_profdata, run_report, run_show, ShowOutcome};
 use render::render_missing_source_view;
 use source::{locate_sources, SourceLocation};
 

@@ -17,9 +17,9 @@ use ratatui::{
 };
 use scheduler::{TaskStatus, COVERAGE_SOURCE_UNAVAILABLE_MARKER};
 
+use super::types::CoverageMode;
 use super::App;
 use crate::launcher::ProcessStatus;
-use super::types::CoverageMode;
 
 /// Human readable time elapsed since `instant`, rounded to the second.
 pub(crate) fn elapsed_since(instant: Instant) -> String {
@@ -81,10 +81,7 @@ impl App {
             return vec![Line::from(spans)];
         }
 
-        let total_text: String = spans
-            .iter()
-            .map(|span| format!("{span}"))
-            .collect();
+        let total_text: String = spans.iter().map(|span| format!("{span}")).collect();
 
         if total_text.len() as u16 <= available_width {
             return vec![Line::from(spans)];
@@ -129,10 +126,7 @@ impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let vertical = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(0),
-            ])
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
             .split(area);
 
         // Render tabs
@@ -258,10 +252,7 @@ impl App {
     fn render_processes_tab(&self, area: Rect, buf: &mut Buffer, block: Block) {
         use chrono::TimeDelta;
 
-        let mut lines = vec![
-            Line::from("Launcher Processes:".bold()),
-            Line::from(""),
-        ];
+        let mut lines = vec![Line::from("Launcher Processes:".bold()), Line::from("")];
 
         if self.launcher_cache.procs.is_empty() {
             lines.push(Line::from("  No processes running".dim()));
@@ -404,10 +395,7 @@ impl App {
 
         let vertical_split = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(6),
-                Constraint::Min(0),
-            ])
+            .constraints([Constraint::Length(6), Constraint::Min(0)])
             .split(area);
 
         let name_style = if is_scheduler_stopped {

@@ -12,8 +12,8 @@ pub mod validation;
 
 mod backend;
 pub mod collector;
-mod process;
 mod coverage_ops;
+mod process;
 mod state;
 mod tasks;
 pub mod types;

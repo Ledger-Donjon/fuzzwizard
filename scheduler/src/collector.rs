@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 use std::collections::HashMap;
+use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::fs;
 
 use sha3::{Digest, Sha3_256};
 

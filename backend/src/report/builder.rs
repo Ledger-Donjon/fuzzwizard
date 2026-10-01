@@ -72,7 +72,10 @@ pub(super) fn load_snapshot_files(
         .load::<FileRow>(conn)
 }
 
-pub(super) fn tail(mut points: Vec<CoverageHistoryPoint>, keep: usize) -> Vec<CoverageHistoryPoint> {
+pub(super) fn tail(
+    mut points: Vec<CoverageHistoryPoint>,
+    keep: usize,
+) -> Vec<CoverageHistoryPoint> {
     if points.len() > keep {
         points.drain(..points.len() - keep);
     }

@@ -5,12 +5,12 @@
 //! crash reporting, and status queries.
 
 use std::collections::HashSet;
+use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Instant;
-use std::fs;
 
 use chrono::prelude::*;
 use chrono::TimeDelta;
@@ -20,12 +20,12 @@ use rand::{rng, Rng};
 use serde::Serialize;
 
 use crate::backend::http_client;
+use crate::backend::post_to_backend;
 use crate::collector::Sha;
 use crate::process::{kill_process_by_pid, remove_container, PROCESS_REGISTRY};
 use crate::types::{CrashReport, ProcessRecord, Task, TaskStatus, TaskStatusInfo};
-use crate::{validation, Result, Scheduler, SchedulerError, TargetsCollector};
 use crate::HEARTBEAT_TIMEOUT;
-use crate::backend::post_to_backend;
+use crate::{validation, Result, Scheduler, SchedulerError, TargetsCollector};
 
 impl<C: TargetsCollector> Scheduler<C> {
     pub(crate) fn kill_task(&mut self, task: &mut Task) {

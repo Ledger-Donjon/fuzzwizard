@@ -7,9 +7,9 @@ use crossterm::event::{KeyCode, KeyEvent};
 use log::error;
 use scheduler::TaskStatus;
 
+use super::types::CoverageMode;
 use super::App;
 use crate::launcher::ProcessStatus;
-use super::types::CoverageMode;
 
 impl App {
     pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) {

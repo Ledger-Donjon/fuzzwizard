@@ -3,11 +3,7 @@
 
 //! `POST /fuzzer_status` — scheduler heartbeat.
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, Json};
 use diesel::prelude::*;
 use log::error;
 

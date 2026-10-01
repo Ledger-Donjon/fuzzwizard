@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: © 2026 LEDGER SAS
 // SPDX-License-Identifier: MIT
 
-use super::App;
 use super::render::wrap_line;
+use super::App;
 
 #[test]
 fn wrap_line_keeps_short_lines_intact() {
