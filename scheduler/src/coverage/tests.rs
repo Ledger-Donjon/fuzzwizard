@@ -16,7 +16,9 @@ use super::runner::{
     build_container_args, is_tool_not_found, llvm_tool_container, tool_not_found_error,
     CoverageRunner, Mount,
 };
-use super::source::{dedup_ancestors, is_safe_source_mount, locate_sources};
+use super::source::{
+    dedup_ancestors, is_safe_source_mount, locate_sources, resolve_safe_source_mount,
+};
 use super::summary::{extract_file_metrics, extract_summary_metrics, MAX_COVERAGE_FILES};
 
 #[test]
@@ -243,7 +245,7 @@ fn locate_sources_mounts_without_flag_when_paths_match() {
         loc.flag.is_none(),
         "no path-equivalence needed when the recorded path exists"
     );
-    assert_eq!(loc.mounts, vec![src_dir]);
+    assert_eq!(loc.mounts, vec![src_dir.canonicalize().unwrap()]);
 }
 
 #[test]
@@ -257,7 +259,7 @@ fn locate_sources_derives_path_equivalence_when_tree_moved() {
 
     let flag = loc.flag.expect("moved tree needs a path-equivalence flag");
     assert!(flag.starts_with("-path-equivalence=/build/elsewhere,"));
-    assert_eq!(loc.mounts, vec![tmp.path().to_path_buf()]);
+    assert_eq!(loc.mounts, vec![tmp.path().canonicalize().unwrap()]);
 }
 
 #[test]
@@ -425,6 +427,28 @@ fn is_safe_source_mount_rejects_system_directories() {
     assert!(!is_safe_source_mount(Path::new("/home")));
     assert!(is_safe_source_mount(Path::new("/home/user/project/src")));
     assert!(is_safe_source_mount(Path::new("/srv/build/src")));
+    assert!(is_safe_source_mount(Path::new("/var/tmp/build/src")));
+    assert!(!is_safe_source_mount(Path::new("/var/log/app")));
+}
+
+#[test]
+fn resolve_safe_source_mount_rejects_symlink_to_system_dir() {
+    let tmp = assert_fs::TempDir::new().unwrap();
+    let link = tmp.path().join("src");
+    std::os::unix::fs::symlink("/etc", &link).unwrap();
+    assert!(
+        resolve_safe_source_mount(&link).is_none(),
+        "a symlink whose target is forbidden must not become a bind-mount"
+    );
+}
+
+#[test]
+fn resolve_safe_source_mount_returns_canonical_real_dir() {
+    let tmp = assert_fs::TempDir::new().unwrap();
+    let src = tmp.path().join("project").join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let resolved = resolve_safe_source_mount(&src).expect("real project src should be mountable");
+    assert_eq!(resolved, src.canonicalize().unwrap());
 }
 
 #[test]

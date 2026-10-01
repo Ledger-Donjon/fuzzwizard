@@ -33,6 +33,10 @@ const FORBIDDEN_SOURCE_MOUNTS: &[&str] = &[
 ];
 
 /// Whether `dir` is specific enough to be exposed to a coverage container.
+///
+/// This is a path-string check only (no filesystem access). Call
+/// [`resolve_safe_source_mount`] before actually bind-mounting, so symlinks
+/// cannot sneak a forbidden tree past the prefix list.
 pub(super) fn is_safe_source_mount(dir: &Path) -> bool {
     if !dir.is_absolute() {
         return false;
@@ -40,9 +44,28 @@ pub(super) fn is_safe_source_mount(dir: &Path) -> bool {
     if dir.components().count() <= MIN_SOURCE_MOUNT_DEPTH {
         return false;
     }
+    // `/var` is otherwise forbidden, but `/var/tmp` is a normal staging area
+    // (and `canonicalize` of `/tmp` lands here on some distros).
+    if dir.starts_with("/var/tmp") {
+        return true;
+    }
     !FORBIDDEN_SOURCE_MOUNTS
         .iter()
         .any(|forbidden| dir.starts_with(forbidden))
+}
+
+/// Canonicalize `dir` and re-apply [`is_safe_source_mount`] on the resolved
+/// target. Returns `None` if the path does not exist, is not a directory, or
+/// resolves to a forbidden / too-shallow location.
+pub(super) fn resolve_safe_source_mount(dir: &Path) -> Option<PathBuf> {
+    if !is_safe_source_mount(dir) {
+        return None;
+    }
+    let canonical = dir.canonicalize().ok()?;
+    if !canonical.is_dir() {
+        return None;
+    }
+    is_safe_source_mount(&canonical).then_some(canonical)
 }
 
 /// Drop directories already covered by another entry so nested source trees
@@ -67,7 +90,7 @@ pub(super) fn dedup_ancestors(mut dirs: Vec<PathBuf>) -> Vec<PathBuf> {
 /// still is for container runs — or the tree was moved, in which case we walk
 /// up from each entry of `binary_paths` to derive a recorded→host mapping.
 ///
-/// Only directories accepted by [`is_safe_source_mount`] are ever returned.
+/// Only directories accepted by [`resolve_safe_source_mount`] are ever returned.
 pub(super) fn locate_sources(
     embedded_paths: &[String],
     binary_paths: &[PathBuf],
@@ -81,7 +104,7 @@ pub(super) fn locate_sources(
         .map(Path::new)
         .filter(|p| p.is_file())
         .filter_map(|p| p.parent().map(Path::to_path_buf))
-        .filter(|dir| is_safe_source_mount(dir))
+        .filter_map(|dir| resolve_safe_source_mount(&dir))
         .collect();
     if !present.is_empty() {
         let mut mounts = dedup_ancestors(present);
@@ -125,14 +148,16 @@ fn locate_moved_sources(embedded_paths: &[String], binary_path: &Path) -> Option
                 break;
             }
             if dir.join(emb_name).is_file() {
-                let host_str = dir.to_string_lossy();
-                let emb_str = emb_dir.to_string_lossy();
-                let flag = format!("-path-equivalence={emb_str},{host_str}");
-                info!("Path equivalence detected: {flag}");
-                return Some(SourceLocation {
-                    flag: Some(flag),
-                    mounts: vec![dir.to_path_buf()],
-                });
+                if let Some(mount) = resolve_safe_source_mount(dir) {
+                    let host_str = mount.to_string_lossy();
+                    let emb_str = emb_dir.to_string_lossy();
+                    let flag = format!("-path-equivalence={emb_str},{host_str}");
+                    info!("Path equivalence detected: {flag}");
+                    return Some(SourceLocation {
+                        flag: Some(flag),
+                        mounts: vec![mount],
+                    });
+                }
             }
             candidate = dir.parent();
         }
