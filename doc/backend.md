@@ -26,7 +26,7 @@ The backend is a REST API that manages crash storage and retrieval in a PostgreS
 - **`GET /crashes/count`**: Get total crash count
 - **`GET /crashes/ids?after={date}`**: Get crash IDs since date
 - **`POST /crashes`**: Upload new crash
-- **`POST /collect_crashes`**: Collect crash artifacts to temp directory
+- **`POST /collect_crashes`**: Write crash artifacts into a private temp directory (mode `0700`). The JSON response is the directory path.
 
 Listing endpoints return metadata only (`id`, `filename`, `scheduler_name`,
 `created_at`). Fetch `/crashes/{id}` to get the artifacts of a given crash.
@@ -77,6 +77,8 @@ Listing endpoints return metadata only (`id`, `filename`, `scheduler_name`,
 - **Program**: 100 MB
 - **Input**: 10 MB
 - **Report**: 1 MB
+- **Filename**: 4096 characters
+- **Scheduler name**: 256 characters
 
 
 ## Usage

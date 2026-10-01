@@ -125,6 +125,9 @@ pub(crate) async fn create_coverage_snapshot(
         ));
     }
     for m in &payload.metrics {
+        if m.metric_name.is_empty() || m.metric_name.len() > 64 {
+            return Err((StatusCode::BAD_REQUEST, "Invalid metric_name".to_string()));
+        }
         if m.total < 0 || m.covered < 0 || m.covered > m.total {
             return Err((
                 StatusCode::BAD_REQUEST,

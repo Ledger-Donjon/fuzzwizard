@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: MIT
 
 use std::collections::HashMap;
-use std::path::Path;
-use std::{fs};
+use std::fs;
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
 
 use axum::{
     extract::{Query, State},
@@ -47,8 +49,6 @@ struct CrashReport {
     input: Vec<u8>,
     filename: String,
     program: Vec<u8>,
-    scheduler_name: String,
-    created_at: NaiveDateTime,
 }
 
 #[derive(Serialize)]
@@ -76,6 +76,12 @@ const DEFAULT_CRASH_LIMIT: i64 = 100;
 
 /// Hard cap on a crash listing.
 const MAX_CRASH_LIMIT: i64 = 1000;
+
+/// Same bound as coverage snapshots / heartbeats.
+const MAX_SCHEDULER_NAME_LEN: usize = 256;
+
+/// Crash `filename` is the fuzzer path; keep it bounded like coverage paths.
+const MAX_FILENAME_LEN: usize = 4096;
 
 pub(crate) async fn get_crashes(
     State(pool): State<DbPool>,
@@ -153,9 +159,7 @@ pub(crate) async fn get_last_n_crashes(
     Ok(Json(crashes))
 }
 
-pub(crate) async fn get_crashes_count(
-    State(pool): State<DbPool>,
-) -> Result<Json<i64>, StatusCode> {
+pub(crate) async fn get_crashes_count(State(pool): State<DbPool>) -> Result<Json<i64>, StatusCode> {
     let mut conn = pool.get().map_err(|e| {
         error!("Failed to get DB connection from pool: {e}");
         StatusCode::SERVICE_UNAVAILABLE
@@ -211,6 +215,10 @@ pub(crate) async fn upload_crash(
                 MAX_REPORT_SIZE / 1024 / 1024
             ),
         ));
+    }
+
+    if let Err(msg) = validate_crash_metadata(&report.filename, &report.scheduler_name) {
+        return Err((StatusCode::BAD_REQUEST, msg));
     }
 
     let mut conn = pool.get().map_err(|e| {
@@ -309,34 +317,64 @@ pub(crate) async fn collect_crashes(
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    let created_fmt = crash.created_at.format("%Y-%m-%dT%H-%M-%S");
-    let dir_name = format!("/tmp/tmp_{created_fmt}_{stem}");
+    let dir = create_private_crash_dir(id, &stem)?;
+    let dir_name = dir.to_string_lossy().into_owned();
 
-    fs::create_dir_all(&dir_name).map_err(|e| {
-        error!("Failed to create directory {dir_name}: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let program_path = Path::new(&dir_name).join(&s_filename);
-    let report_path = Path::new(&dir_name).join("crash_info.txt");
-    let input_path = Path::new(&dir_name).join("crash_input.txt");
-
-    fs::write(&program_path, &crash.program).map_err(|e| {
-        error!("Failed to write program file: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    fs::write(&report_path, &crash.report).map_err(|e| {
-        error!("Failed to write report file: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    fs::write(&input_path, &crash.input).map_err(|e| {
-        error!("Failed to write input file: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    write_private_file(&dir.join(&s_filename), &crash.program)?;
+    write_private_file(&dir.join("crash_info.txt"), &crash.report)?;
+    write_private_file(&dir.join("crash_input.txt"), &crash.input)?;
 
     Ok((StatusCode::CREATED, Json(dir_name)))
+}
+
+fn validate_crash_metadata(filename: &str, scheduler_name: &str) -> Result<(), String> {
+    if filename.is_empty() || filename.len() > MAX_FILENAME_LEN || filename.contains('\0') {
+        return Err("Invalid filename".to_string());
+    }
+    if scheduler_name.is_empty()
+        || scheduler_name.len() > MAX_SCHEDULER_NAME_LEN
+        || scheduler_name.contains('\0')
+    {
+        return Err("Invalid scheduler_name".to_string());
+    }
+    Ok(())
+}
+
+fn create_private_crash_dir(id: i32, stem: &str) -> Result<PathBuf, StatusCode> {
+    let stem = if stem.len() > 64 { &stem[..64] } else { stem };
+    let unique = format!(
+        "fuzzwizard_{id}_{stem}_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let dir = std::env::temp_dir().join(unique);
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .map_err(|e| {
+            error!("Failed to create directory {}: {e}", dir.display());
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    Ok(dir)
+}
+
+fn write_private_file(path: &Path, data: &[u8]) -> Result<(), StatusCode> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| {
+            error!("Failed to create {}: {e}", path.display());
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    file.write_all(data).map_err(|e| {
+        error!("Failed to write {}: {e}", path.display());
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(())
 }
 
 pub(crate) async fn get_crash_ids(
@@ -375,4 +413,24 @@ pub(crate) async fn get_crash_ids(
         .collect();
 
     Ok(Json(crash_ids))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_crash_metadata;
+
+    #[test]
+    fn validate_crash_metadata_accepts_typical_fuzzer_path() {
+        assert!(validate_crash_metadata("/data/targets/json_fuzzer", "prod").is_ok());
+    }
+
+    #[test]
+    fn validate_crash_metadata_rejects_empty_or_oversized() {
+        assert!(validate_crash_metadata("", "prod").is_err());
+        assert!(validate_crash_metadata("fuzzer", "").is_err());
+        assert!(validate_crash_metadata(&"x".repeat(4097), "prod").is_err());
+        assert!(validate_crash_metadata("fuzzer", &"s".repeat(257)).is_err());
+        assert!(validate_crash_metadata("fuzzer\0bin", "prod").is_err());
+        assert!(validate_crash_metadata("fuzzer", "prod\0").is_err());
+    }
 }
