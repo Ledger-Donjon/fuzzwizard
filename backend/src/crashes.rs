@@ -47,7 +47,6 @@ pub(crate) struct CrashReportWithId {
 struct CrashReport {
     report: Vec<u8>,
     input: Vec<u8>,
-    filename: String,
     program: Vec<u8>,
 }
 
@@ -298,29 +297,13 @@ pub(crate) async fn collect_crashes(
         }
     };
 
-    let s_filename = Path::new(&crash.filename)
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .into_owned();
-
-    let stem = Path::new(&s_filename)
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-        .collect::<String>();
-
-    if stem.is_empty() {
-        error!("Invalid filename in crash record id={id}");
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
-    let dir = create_private_crash_dir(id, &stem)?;
+    // Do not use the uploaded filename in filesystem paths. It is retained as
+    // crash metadata, but both the extraction directory and artifact names are
+    // entirely server-controlled.
+    let dir = create_private_crash_dir(id)?;
     let dir_name = dir.to_string_lossy().into_owned();
 
-    write_private_file(&dir.join(&s_filename), &crash.program)?;
+    write_private_file(&dir.join("program"), &crash.program)?;
     write_private_file(&dir.join("crash_info.txt"), &crash.report)?;
     write_private_file(&dir.join("crash_input.txt"), &crash.input)?;
 
@@ -340,10 +323,9 @@ fn validate_crash_metadata(filename: &str, scheduler_name: &str) -> Result<(), S
     Ok(())
 }
 
-fn create_private_crash_dir(id: i32, stem: &str) -> Result<PathBuf, StatusCode> {
-    let stem = if stem.len() > 64 { &stem[..64] } else { stem };
+fn create_private_crash_dir(id: i32) -> Result<PathBuf, StatusCode> {
     let unique = format!(
-        "fuzzwizard_{id}_{stem}_{}",
+        "fuzzwizard_{id}_{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())

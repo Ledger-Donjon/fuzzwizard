@@ -400,7 +400,7 @@ impl<C: TargetsCollector> Scheduler<C> {
         }
 
         let mut status_changed = false;
-        for (_sha, task) in self.tasks.iter_mut() {
+        for task in self.tasks.values_mut() {
             if task.status == TaskStatus::Running {
                 task.status = TaskStatus::Stopped;
                 task.stopped_at = Some(Instant::now());
@@ -415,7 +415,7 @@ impl<C: TargetsCollector> Scheduler<C> {
 
     pub fn report_crashes(&mut self) -> Result<()> {
         let mut crashed_tasks = Vec::new();
-        for (_hash, task) in self.tasks.iter_mut() {
+        for task in self.tasks.values_mut() {
             if task.status != TaskStatus::Running {
                 continue;
             }

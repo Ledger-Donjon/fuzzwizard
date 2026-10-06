@@ -372,44 +372,6 @@ impl Launcher {
         }
     }
 
-    /// Collect information about schedulers and check if they are still active
-    pub fn collect_scheduler(&mut self) {
-        // Get the set of scheduler names that should be running from config
-        let scheduler_names_in_config: std::collections::HashSet<String> = self
-            .config_json
-            .schedulers
-            .iter()
-            .map(|s| s.name.clone())
-            .collect();
-
-        for scheduler in &mut self.scheduler_processes {
-            // Check if scheduler is still in config
-            if scheduler_names_in_config.contains(&scheduler.name) {
-                // Scheduler is still in config, ensure it's marked as running
-                if matches!(scheduler.status, ProcessStatus::Stopped) {
-                    // Scheduler was stopped but is back in config, mark as running
-                    scheduler.status = ProcessStatus::Running;
-                    scheduler.info = format!("Scheduler '{}' is active", scheduler.name);
-                } else {
-                    // Scheduler is running and still in config, keep it as running
-                    scheduler.status = ProcessStatus::Running;
-                }
-            } else {
-                // Scheduler is no longer in config, mark as stopped
-                if matches!(scheduler.status, ProcessStatus::Running) {
-                    scheduler.scheduler.kill_tasks();
-                    scheduler.status = ProcessStatus::Stopped;
-                    scheduler.info = format!(
-                        "Scheduler '{}' stopped: removed from config",
-                        scheduler.name
-                    );
-                    let backend_url = self.backend_url.clone();
-                    send_admin_event_to_backend(&backend_url, "scheduler_removed", &scheduler.info);
-                }
-            }
-        }
-    }
-
     pub fn shutdown(&mut self) {
         for proc in &mut self.procs {
             if let Err(e) = proc.child.kill() {
@@ -496,7 +458,7 @@ fn create_scheduler(
 
     // If logdir does not exist, create it
     if let Err(e) = std::fs::create_dir_all(&logdir) {
-        error!("Failed to create log directory '{}': {}", &logdir, e);
+        error!("Failed to create log directory '{}': {}", logdir, e);
     }
 
     let config_json: scheduler::SchedulerConfig =
