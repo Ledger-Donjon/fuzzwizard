@@ -107,6 +107,7 @@ cargo run -p fuzztui -- config.json
 ### Scheduler Tabs
 - **Up/Down**: Navigate through tasks in the table
 - **D**: Display coverage for the selected task (only when scheduler is running and task has coverage)
+- **P**: Display project-wide coverage (merges all tasks in this scheduler)
 - **M**: Open task management menu (only when scheduler is running)
   - **Up/Down**: Navigate menu options
   - **Enter**: Execute selected action
@@ -125,15 +126,16 @@ When a task is selected and the scheduler is running, pressing **M** opens a con
 
 **Note**: If the scheduler is stopped, the interface is dimmed and task management is disabled. Navigation (Up/Down) still works to view tasks, but no interactions are possible.
 
-### Task Management Menu – DISPLAY COVERAGE
+### Task Management Menu – Coverage
 
 When a task is selected and the scheduler is running, the menu includes:
 
 - **DISPLAY COVERAGE**: Open the coverage view for the selected task (requires coverage enabled and LLVM tools: `llvm-profdata`, `llvm-cov`).
+- **DISPLAY PROJECT COVERAGE**: Open the project-wide coverage view, merging `.profraw` files from **all** tasks in this scheduler into a single `project.profdata` and running `llvm-cov` with every instrumented binary. All fuzzers must share a compatible LLVM instrumentation version.
 
 ### Coverage View
 
-When coverage is displayed (key **D** or menu **DISPLAY COVERAGE**), a full-screen overlay shows:
+When coverage is displayed (key **D** / **P** or menu **DISPLAY COVERAGE** / **DISPLAY PROJECT COVERAGE**), a full-screen overlay shows:
 
 1. **Summary table**: Header row plus one row per source file with coverage (Regions, Functions, Lines, Branches). The first column is the file path.
 2. **Navigation**:
@@ -144,6 +146,12 @@ When coverage is displayed (key **D** or menu **DISPLAY COVERAGE**), a full-scre
 3. **File view**: Line-by-line coverage for one source file. **Up/Down** scroll the content; **B** or **Esc** returns to the summary table.
 
 Coverage data is produced by the scheduler using `llvm-profdata` (merge of `.profraw` files) and `llvm-cov` (report/show). The scheduler must have `has_coverage: true` and a valid `coverage_directory` in its config.
+
+When sources are not available on disk, the coverage view falls back to region-level data from `llvm-cov export` (functions, regions, uncovered line ranges). The overlay title shows "source unavailable" and the border turns yellow.
+
+#### Project coverage
+
+Project coverage (`P` / **DISPLAY PROJECT COVERAGE**) merges all `.profraw` files across tasks into `{coverage_directory}/project.profdata` and passes every binary as `-object` to `llvm-cov`. The merge and analysis run in a background thread so the TUI remains responsive. If `llvm-profdata merge` fails (e.g. incompatible LLVM versions across fuzzers), the error is displayed in the overlay.
 
 ## See Also
 

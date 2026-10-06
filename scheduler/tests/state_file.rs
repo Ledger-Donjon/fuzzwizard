@@ -43,6 +43,7 @@ fn test_state_file_path() {
         has_coverage: false,
         llvm_bin_directory: None,
         state_file: Some(state_file_path.to_string_lossy().into()),
+        coverage_snapshot_interval_minutes: None,
     };
 
     let scheduler = Scheduler::new(collector, config, None);
@@ -75,6 +76,7 @@ fn test_state_file_default_path() {
         has_coverage: false,
         llvm_bin_directory: None,
         state_file: None,
+        coverage_snapshot_interval_minutes: None,
     };
 
     let scheduler = Scheduler::new(collector, config, None);
@@ -113,6 +115,7 @@ fn test_state_file_creation() {
         has_coverage: false,
         llvm_bin_directory: None,
         state_file: Some(state_file_path.to_string_lossy().into()),
+        coverage_snapshot_interval_minutes: None,
     };
 
     let _scheduler = Scheduler::new(collector, config, None);
@@ -161,6 +164,7 @@ fn test_state_file_write_and_read() {
         has_coverage: false,
         llvm_bin_directory: None,
         state_file: Some(state_file_path.to_string_lossy().into()),
+        coverage_snapshot_interval_minutes: None,
     };
 
     let mut scheduler = Scheduler::new(collector, config, None);
@@ -227,6 +231,7 @@ done
         has_coverage: false,
         llvm_bin_directory: None,
         state_file: Some(state_file_path.to_string_lossy().into()),
+        coverage_snapshot_interval_minutes: None,
     };
 
     let mut scheduler = Scheduler::new(collector, config, None);
@@ -288,6 +293,7 @@ fn test_state_file_with_env_and_options() {
         has_coverage: false,
         llvm_bin_directory: None,
         state_file: Some(state_file_path.to_string_lossy().into()),
+        coverage_snapshot_interval_minutes: None,
     };
 
     let mut scheduler = Scheduler::new(collector, config, None);

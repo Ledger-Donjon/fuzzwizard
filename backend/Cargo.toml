@@ -7,6 +7,14 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+[[bin]]
+name = "backend"
+path = "src/main.rs"
+
+[[bin]]
+name = "fuzzwizard-cleanup"
+path = "src/bin/cleanup.rs"
+
 [dependencies]
 axum = {version = "0.8.3", features = ["macros"] }
 chrono = {version = "0.4.41", features = ["serde"] }
@@ -16,4 +24,8 @@ log = "0.4.28"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 tokio = { version = "1.44.2", features = ["full"] }
+tower-http = { version = "0.6", features = ["catch-panic"] }
 ftail = "0.3"
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+clap = { version = "4", features = ["derive", "env"] }
+dialoguer = "0.11"

@@ -5,7 +5,6 @@ use anyhow::{Context, Result};
 use log::info;
 use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE};
 use serde::Serialize;
-use std::path::Path;
 
 use crate::traits::{CrashReport, NotificationProvider};
 
@@ -73,17 +72,9 @@ impl NotificationProvider for SlackNotificationProvider {
 
         info!("Sending Slack notification for crash: {}", report.id);
 
-        let created_fmt = report.created_at.format("%Y-%m-%dT%H-%M-%S");
-        let stem = Path::new(&report.filename)
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        let dir = format!("/tmp/tmp_{created_fmt}_{stem}");
-
         let to_send = format!(
-            "New crash for {} (id: {})\n\nTo retrieve artifacts locally:\n\n$ curl -X POST http://127.0.0.1:3000/collect_crashes -H 'Content-Type: application/json' -d '{}'\n\nFiles will be created under {}\n- {} (program binary)\n- crash_info.txt (report)\n- crash_input.txt (input)\n",
-            &report.filename, report.id, report.id, dir, &report.filename
+            "New crash for {} (id: {})\n\nTo retrieve artifacts locally:\n\n$ curl -X POST http://127.0.0.1:3000/collect_crashes -H 'Content-Type: application/json' -d '{}'\n\nThe JSON response is a private temp directory (mode 0700) containing:\n- the program binary\n- crash_info.txt (report)\n- crash_input.txt (input)\n",
+            report.filename, report.id, report.id
         );
 
         self.send_slack_message(&to_send)?;

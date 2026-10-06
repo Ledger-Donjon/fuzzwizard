@@ -1,15 +1,16 @@
 // SPDX-FileCopyrightText: © 2026 LEDGER SAS
 // SPDX-License-Identifier: MIT
 
-use log::{error, info};
-use reqwest::blocking::Client;
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use std::{fmt, fs};
 
+use log::{error, info};
+use reqwest::blocking::Client;
+use scheduler::build::{BuildOutcome, Builder};
 use scheduler::{DirectoryTargetsCollector, Scheduler, SchedulerConfig};
+use serde::{Deserialize, Serialize};
 
 fn send_admin_event_to_backend(backend_url: &str, event_type: &str, message: &str) {
     let client = Client::new();
@@ -50,7 +51,19 @@ pub struct SchedulerProcess {
     pub info: String,
     pub status: ProcessStatus,
     pub config: SchedulerConfig,
-    pub last_build_at: Option<Instant>,
+    builder: Builder,
+}
+
+impl SchedulerProcess {
+    /// When the last build of this scheduler's targets finished.
+    pub fn last_build_at(&self) -> Option<Instant> {
+        self.builder.last_build_at()
+    }
+
+    /// Since when a build has been running, if one is in flight.
+    pub fn building_since(&self) -> Option<Instant> {
+        self.builder.running_since()
+    }
 }
 
 // These 2 structures represent the fields from config.json
@@ -164,7 +177,7 @@ impl Launcher {
         for scheduler in &self.config_json.schedulers {
             let scheduler_config_path = scheduler.config.clone();
             info!("Reading scheduler config file {scheduler_config_path}\n");
-            let (scheduler_started, config, last_build_at) = create_scheduler(
+            let (scheduler_started, config) = create_scheduler(
                 &scheduler_config_path,
                 self.config_json.logdir.clone(),
                 self.config_json.container_binary.clone(),
@@ -176,7 +189,6 @@ impl Launcher {
                 Instant::now(),
                 scheduler_started,
                 config,
-                last_build_at,
             );
 
             let _update = sched_proc
@@ -276,7 +288,7 @@ impl Launcher {
                 if sched_proc.name == scheduler.name
                     && matches!(sched_proc.status, ProcessStatus::Stopped)
                 {
-                    let (scheduler_started, config, last_build_at) = create_scheduler(
+                    let (scheduler_started, config) = create_scheduler(
                         &scheduler.config.clone(),
                         self.config_json.logdir.clone(),
                         self.config_json.container_binary.clone(),
@@ -284,8 +296,12 @@ impl Launcher {
                     sched_proc.path = PathBuf::from(&scheduler.config);
                     sched_proc.started_at = Instant::now();
                     sched_proc.scheduler = scheduler_started;
+                    sched_proc.builder = Builder::new(
+                        sched_proc.name.clone(),
+                        config.build_script.clone(),
+                        config.build_script_interval_hours,
+                    );
                     sched_proc.config = config;
-                    sched_proc.last_build_at = last_build_at;
                     sched_proc.status = ProcessStatus::Running;
                     sched_proc.info = format!("Scheduler '{}' is active", sched_proc.name.clone());
 
@@ -300,7 +316,7 @@ impl Launcher {
                 .iter()
                 .any(|p| p.name == scheduler.name);
             if !already_running {
-                let (scheduler_started, config, last_build_at) = create_scheduler(
+                let (scheduler_started, config) = create_scheduler(
                     &scheduler.config.clone(),
                     self.config_json.logdir.clone(),
                     self.config_json.container_binary.clone(),
@@ -311,7 +327,6 @@ impl Launcher {
                     Instant::now(),
                     scheduler_started,
                     config,
-                    last_build_at,
                 );
                 info!("New scheduler updated: {}", scheduler.name);
                 let _update = new_scheduler
@@ -337,15 +352,12 @@ impl Launcher {
                 continue;
             }
 
-            // Optionally: re-build targets if configuration changed (non-blocking)
-            // The build happens in background, we update last_build_at optimistically
-            let build_result = build_targets(
-                sched_proc.config.clone(),
-                sched_proc.last_build_at,
-                &self.backend_url,
-            );
-            if let Some(build_time) = build_result {
-                sched_proc.last_build_at = Some(build_time);
+            // Start or reap the build of this scheduler's targets. The script
+            // runs on its own thread: waiting for it here would hold the
+            // launcher lock, freezing the UI and the other schedulers.
+            if let Some(BuildOutcome::Failure(msg)) = sched_proc.builder.poll() {
+                error!("{msg}");
+                send_admin_event_to_backend(&self.backend_url, "build_error", &msg);
             }
 
             let _ = sched_proc.scheduler.report_crashes();
@@ -354,44 +366,9 @@ impl Launcher {
             let _update = sched_proc
                 .scheduler
                 .update(self.config_json.logdir.clone().as_str());
-        }
-    }
 
-    /// Collect information about schedulers and check if they are still active
-    pub fn collect_scheduler(&mut self) {
-        // Get the set of scheduler names that should be running from config
-        let scheduler_names_in_config: std::collections::HashSet<String> = self
-            .config_json
-            .schedulers
-            .iter()
-            .map(|s| s.name.clone())
-            .collect();
-
-        for scheduler in &mut self.scheduler_processes {
-            // Check if scheduler is still in config
-            if scheduler_names_in_config.contains(&scheduler.name) {
-                // Scheduler is still in config, ensure it's marked as running
-                if matches!(scheduler.status, ProcessStatus::Stopped) {
-                    // Scheduler was stopped but is back in config, mark as running
-                    scheduler.status = ProcessStatus::Running;
-                    scheduler.info = format!("Scheduler '{}' is active", scheduler.name);
-                } else {
-                    // Scheduler is running and still in config, keep it as running
-                    scheduler.status = ProcessStatus::Running;
-                }
-            } else {
-                // Scheduler is no longer in config, mark as stopped
-                if matches!(scheduler.status, ProcessStatus::Running) {
-                    scheduler.scheduler.kill_tasks();
-                    scheduler.status = ProcessStatus::Stopped;
-                    scheduler.info = format!(
-                        "Scheduler '{}' stopped: removed from config",
-                        scheduler.name
-                    );
-                    let backend_url = self.backend_url.clone();
-                    send_admin_event_to_backend(&backend_url, "scheduler_removed", &scheduler.info);
-                }
-            }
+            sched_proc.scheduler.snapshot_coverage_if_due();
+            sched_proc.scheduler.report_status();
         }
     }
 
@@ -423,8 +400,13 @@ impl SchedulerProcess {
         started_at: Instant,
         scheduler: Scheduler<DirectoryTargetsCollector>,
         config: SchedulerConfig,
-        last_build_at: Option<Instant>,
     ) -> Self {
+        let builder = Builder::new(
+            name.clone(),
+            config.build_script.clone(),
+            config.build_script_interval_hours,
+        );
+
         SchedulerProcess {
             name: name.clone(),
             path,
@@ -433,7 +415,7 @@ impl SchedulerProcess {
             info: format!("Scheduler {} started", name.clone()).to_string(),
             status: ProcessStatus::Running,
             config,
-            last_build_at,
+            builder,
         }
     }
 }
@@ -465,88 +447,23 @@ fn spawn_process(
     }
 }
 
-fn build_targets(
-    config_json: scheduler::SchedulerConfig,
-    last_build_at: Option<Instant>,
-    backend_url: &str,
-) -> Option<Instant> {
-    let now = Instant::now();
-    let scheduler_name = config_json.scheduler_name.clone();
-    let build_script = config_json.build_script.clone();
-
-    if let Some(hours) = config_json.build_script_interval_hours {
-        if hours > 0 {
-            let min_interval = Duration::from_secs(hours.saturating_mul(3600));
-            let prev = last_build_at.unwrap_or(now);
-            if now.duration_since(prev) < min_interval {
-                info!(
-                    "Skipping build_script for {} ({}h interval not elapsed)",
-                    config_json.scheduler_name, hours
-                );
-                return Some(prev);
-            }
-        }
-    }
-
-    if let Err(e) = scheduler::validation::validate_build_script(&build_script) {
-        error!("Build script rejected for {scheduler_name}: {e}");
-        send_admin_event_to_backend(
-            backend_url,
-            "build_error",
-            &format!("Build script rejected: {e}"),
-        );
-        return None;
-    }
-
-    info!("Executing build script for {scheduler_name}: {build_script}");
-
-    let status = Command::new(build_script.trim())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .and_then(|mut child| child.wait());
-
-    match status {
-        Ok(s) if s.success() => {
-            info!("build_script ran successfully for {scheduler_name}");
-        }
-        Ok(s) => {
-            let msg = format!("build_script exited with status: {s} for {scheduler_name}");
-            error!("{msg}");
-            send_admin_event_to_backend(backend_url, "build_error", &msg);
-        }
-        Err(e) => {
-            let msg = format!("Failed to run build_script for {scheduler_name}: {e}");
-            error!("{msg}");
-            send_admin_event_to_backend(backend_url, "build_error", &msg);
-        }
-    }
-
-    Some(now)
-}
-
 fn create_scheduler(
     config_path: &str,
     logdir: String,
     container_binary: Option<String>,
-) -> (
-    Scheduler<DirectoryTargetsCollector>,
-    SchedulerConfig,
-    Option<Instant>,
-) {
+) -> (Scheduler<DirectoryTargetsCollector>, SchedulerConfig) {
     info!("Reading config file {config_path}\n");
     let config_contents = fs::read_to_string(config_path)
         .unwrap_or_else(|_| panic!("Failed to read config file {config_path}"));
 
     // If logdir does not exist, create it
     if let Err(e) = std::fs::create_dir_all(&logdir) {
-        error!("Failed to create log directory '{}': {}", &logdir, e);
+        error!("Failed to create log directory '{}': {}", logdir, e);
     }
 
     let config_json: scheduler::SchedulerConfig =
         serde_json::from_str(&config_contents).expect("Failed to parse config file as JSON");
 
-    let last_build_at = build_targets(config_json.clone(), None, "http://127.0.0.1:3000");
     let collector = DirectoryTargetsCollector::new(
         config_json
             .targets_directory
@@ -560,5 +477,5 @@ fn create_scheduler(
         container_binary.map(PathBuf::from),
     );
 
-    (scheduler, config_json.clone(), last_build_at)
+    (scheduler, config_json)
 }

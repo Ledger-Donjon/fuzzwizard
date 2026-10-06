@@ -94,7 +94,10 @@ Fuzzers can run in containers (Docker/Podman):
 
 If `has_coverage` is true:
 - Sends SIGUSR1 to fuzzers to trigger coverage
-- Stores `.profraw` files in coverage directory
+- Stores `.profraw` files in coverage directory using LLVM's `%m` online
+  merging, so repeated live snapshots update bounded files instead of appending
+  complete profiles indefinitely
+- Project-wide coverage can be generated on demand by merging all task `.profraw` files into `{coverage_directory}/project.profdata` and running `llvm-cov` with every instrumented binary (multi-object)
 
 
 ## State File

@@ -71,6 +71,7 @@ done
         has_coverage: false,
         llvm_bin_directory: None,
         state_file: None,
+        coverage_snapshot_interval_minutes: None,
     };
 
     let mut scheduler = Scheduler::new(collector, config, None);
@@ -90,6 +91,73 @@ done
     // Verify tasks exist
     let tasks = scheduler.get_tasks_with_status();
     assert!(!tasks.is_empty(), "should have at least one task");
+}
+
+/// A fuzz target writes its own stderr, so the crash report parser must treat
+/// it as untrusted: an `artifact_prefix=` line without the
+/// `Test unit written to ` marker used to be sliced past its end and panicked
+/// the whole scheduler.
+#[test]
+fn a_truncated_artifact_prefix_line_does_not_panic() {
+    let temp_dir = assert_fs::TempDir::new().unwrap();
+    let targets_dir = temp_dir.path().join("targets");
+    fs::create_dir_all(&targets_dir).unwrap();
+
+    let test_fuzzer = targets_dir.join("truncated_prefix.sh");
+    fs::write(
+        &test_fuzzer,
+        r#"#!/bin/sh
+echo "artifact_prefix=/f" >&2
+exit 1
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&test_fuzzer, fs::Permissions::from_mode(0o775)).unwrap();
+
+    let collector = DirectoryCollector {
+        targets_dir: targets_dir.clone(),
+    };
+    let log_dir = temp_dir.path().join("logs");
+    fs::create_dir_all(&log_dir).unwrap();
+
+    let config = SchedulerConfig {
+        scheduler_name: "test_scheduler_truncated_prefix".to_string(),
+        targets_directory: vec![targets_dir.to_string_lossy().into()],
+        build_script: "".to_string(),
+        build_script_interval_hours: None,
+        backend_url: "http://127.0.0.1:0".to_string(),
+        corpus_directory: temp_dir.path().join("corpus").to_string_lossy().into(),
+        crashes_directory: temp_dir.path().join("crashes").to_string_lossy().into(),
+        coverage_directory: temp_dir.path().join("coverage").to_string_lossy().into(),
+        container_image: None,
+        container_options: None,
+        has_coverage: false,
+        llvm_bin_directory: None,
+        state_file: None,
+        coverage_snapshot_interval_minutes: None,
+    };
+
+    let mut scheduler = Scheduler::new(collector, config, None);
+    scheduler.update(log_dir.to_str().unwrap()).unwrap();
+
+    // Give the target time to exit, so that the crash path is the one taken.
+    std::thread::sleep(Duration::from_secs(1));
+
+    // The backend is unreachable, so reporting the crash fails on the upload.
+    // Reaching that failure is the point: it proves the stderr parsing above
+    // ran to completion instead of panicking.
+    let result = scheduler.report_crashes();
+    assert!(
+        matches!(result, Err(scheduler::SchedulerError::Backend(_))),
+        "expected the crash path to run and fail on the upload, got {result:?}"
+    );
+    assert!(
+        scheduler
+            .get_tasks_with_status()
+            .iter()
+            .any(|t| t.status == scheduler::TaskStatus::Crashed),
+        "the exited target should have been recorded as crashed"
+    );
 }
 
 #[test]
@@ -118,6 +186,7 @@ fn test_report_crashes_with_no_tasks() {
         has_coverage: false,
         llvm_bin_directory: None,
         state_file: None,
+        coverage_snapshot_interval_minutes: None,
     };
 
     let mut scheduler = Scheduler::new(collector, config, None);

@@ -207,7 +207,8 @@ Each scheduler has its own configuration file that defines what to fuzz and how.
   "llvm_bin_directory": null,
   "container_image": null,
   "container_options": null,
-  "state_file": null
+  "state_file": null,
+  "coverage_snapshot_interval_minutes": null
 }
 ```
 
@@ -248,9 +249,10 @@ List of directories where binaries to fuzz are located.
 
 Path to the script that builds the fuzzer targets.
 
-- Script is executed in the background when the scheduler is created
 - Script must compile binaries into the `targets_directory` directories
-- Script is executed with `sh -c`
+- Script is executed directly, not through a shell: inline shell commands are rejected
+- Script runs on its own thread, so scheduling, crash reporting, coverage collection and the FuzzTUI stay responsive during a build. Targets built by the script are picked up by the next refresh.
+- Leave empty to disable building entirely
 
 **Example**: `"/opt/fuzzwizard/scripts/build.sh"`
 
@@ -260,9 +262,10 @@ Path to the script that builds the fuzzer targets.
 
 Minimum time between two runs of `build_script`, in whole hours.
 
-- If omitted or `null`, the build script runs on **every** scheduler refresh (FuzzTUI periodic update) or on **every** loop iteration (standalone `scheduler` binary, every 60 seconds).
+- If omitted or `null`, a new build starts as soon as the previous one finishes, at the next scheduler refresh (FuzzTUI periodic update) or loop iteration (standalone `scheduler` binary, every 60 seconds).
 - If set to a **positive** integer (e.g. `6`), `build_script` runs at most once per that many hours; intermediate updates still refresh targets and tasks, but skip rebuilding until the interval has elapsed.
 - `0` is treated like omitted: no hourly throttling.
+- The first build always runs at startup, whatever the interval, so that targets exist. The interval is counted from the end of the previous build, and a build is never started while another is still running.
 
 **Example**: `"build_script_interval_hours": 24` for at most one build per day.
 
@@ -305,7 +308,9 @@ Base directory for coverage files.
 
 - Each fuzzer has its own subdirectory: `{coverage_directory}/{fuzzer_name}/`
 - Used only if `has_coverage: true`
-- `.profraw` files are stored here
+- `.profraw` files are stored here with LLVM `%m` online merging to keep
+  repeated live coverage snapshots bounded
+- Project-wide merged profile is written to `{coverage_directory}/project.profdata` on demand
 
 **Example**: `"/opt/fuzzwizard/coverage"`
 
@@ -320,12 +325,25 @@ Enable or disable coverage collection.
 
 **Note**: Requires binaries to be compiled with coverage instrumentation (LLVM).
 
+#### `coverage_snapshot_interval_minutes` (number, optional)
+
+Minutes between two periodic coverage snapshots sent to the backend, which is what keeps the [report](backend.md) showing current coverage instead of the coverage of the last rebuild.
+
+- If omitted or `null`, defaults to **60**.
+- `0` disables the timer, restoring the previous behaviour where a snapshot is only taken when a fuzzer binary appears or disappears. On a campaign running for days on a stable build, that means no coverage update at all.
+- The first periodic snapshot waits up to 5 minutes after startup, so the fuzzers have flushed a `.profraw` for the merge to read.
+
+Each snapshot re-runs `llvm-profdata merge` and `llvm-cov export` over every instrumented binary. That work happens in a background thread and never delays fuzzer supervision, but it does cost CPU: lengthen the interval on large projects, and note that a snapshot still running when the next one is due is simply skipped.
+
+**Example**: `"coverage_snapshot_interval_minutes": 30` for a more reactive report.
+
 #### `llvm_bin_directory` (string, optional)
 
 Directory that contains the LLVM tools `llvm-cov` and `llvm-profdata`, used when the scheduler analyzes coverage (FuzzTUI / API).
 
-- If omitted or `null`, the scheduler tries the environment variable `FUZZWIZARD_LLVM_BIN` (same semantics: directory path), then falls back to resolving those tool names from `PATH`.
-- Set this when LLVM is not on the default `PATH` (for example Homebrew: `/opt/homebrew/opt/llvm/bin`).
+- **Native mode** (no `container_image`): interpreted as a host path. If omitted or `null`, the scheduler tries the environment variable `FUZZWIZARD_LLVM_BIN` (same semantics: directory path), then falls back to resolving those tool names from `PATH`.
+- **Container mode** (`container_image` is set): interpreted as a path *inside* the container image. The `FUZZWIZARD_LLVM_BIN` environment variable is not used in container mode.
+- Set this when LLVM is not on the default `PATH`
 
 **Example**: `"/opt/homebrew/opt/llvm/bin"`
 
@@ -335,6 +353,7 @@ Docker/Podman image to use for executing fuzzers.
 
 - If set, fuzzers are executed in containers
 - Image must contain necessary tools (libFuzzer, etc.)
+- **The same image is also used to run `llvm-profdata` and `llvm-cov` when displaying coverage**, so it must include those tools.
 - Volumes are automatically mounted:
   - `/fuzzer/binary`: Fuzzer binary
   - `/fuzzer/crash_dir/`: Crash directory
@@ -350,15 +369,26 @@ Docker/Podman image to use for executing fuzzers.
 Additional options to pass to the container.
 
 - Added after the mounted volumes
-- Useful for options like `--privileged`, `--network`, etc.
+- Restricted to a strict allowlist of resource limits and cosmetic flags:
+  `--cpu-period`, `--cpu-quota`, `--cpu-shares`, `--cpus`, `--cpuset-cpus`,
+  `--cpuset-mems`, `-e`, `--env`, `--hostname`, `--init`, `--label`,
+  `--memory`, `--memory-reservation`, `--memory-swap`, `--pids-limit`,
+  `--platform`, `--shm-size`, `--ulimit`, `-w`, `--workdir`
+- Anything else is rejected and the scheduler refuses to start the fuzzer.
+  Because these options are appended after the flags that build the sandbox
+  (`--cap-drop ALL`, `--network=none`, `--read-only`, ...), the container
+  runtime would let them override that hardening, so flags touching
+  namespaces, capabilities, devices, mounts or the entrypoint are never
+  accepted.
+- Both `--flag value` and `--flag=value` forms are supported.
 
 **Example**:
 ```json
 {
   "container_options": [
-    "--privileged",
-    "--network=host",
-    "--cap-add=SYS_PTRACE"
+    "--platform=linux/amd64",
+    "--memory", "4g",
+    "--cpus=2"
   ]
 }
 ```
@@ -394,9 +424,10 @@ Path to the shared state file.
   "llvm_bin_directory": null,
   "container_image": "fuzzing-image:latest",
   "container_options": [
-    "--privileged"
+    "--memory=4g"
   ],
-  "state_file": "/var/lib/fuzzwizard/scheduler_state.json"
+  "state_file": "/var/lib/fuzzwizard/scheduler_state.json",
+  "coverage_snapshot_interval_minutes": 60
 }
 ```
 

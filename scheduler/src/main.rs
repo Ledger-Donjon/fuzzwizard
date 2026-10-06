@@ -1,60 +1,15 @@
 // SPDX-FileCopyrightText: © 2026 LEDGER SAS
 // SPDX-License-Identifier: MIT
 
-use ftail::Ftail;
-use log::error;
-use log::info;
-use log::LevelFilter;
-use scheduler::{DirectoryTargetsCollector, Scheduler};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
-use std::time::{Duration, Instant};
 
-fn build_targets(
-    config_json: scheduler::SchedulerConfig,
-    last_build_at: Option<Instant>,
-) -> Option<Instant> {
-    let now = Instant::now();
+use ftail::Ftail;
+use log::{error, LevelFilter};
+use scheduler::build::{BuildOutcome, Builder};
+use scheduler::{DirectoryTargetsCollector, Scheduler};
 
-    if let Some(hours) = config_json.build_script_interval_hours {
-        if hours > 0 {
-            let min_interval = Duration::from_secs(hours.saturating_mul(3600));
-            if let Some(prev) = last_build_at {
-                if now.duration_since(prev) < min_interval {
-                    return last_build_at;
-                }
-            }
-        }
-    }
-    let build_script = &config_json.build_script;
-
-    if let Err(e) = scheduler::validation::validate_build_script(build_script) {
-        error!("Build script rejected: {e}");
-        return last_build_at;
-    }
-
-    info!("Executing build script: {build_script}");
-
-    let status = Command::new(build_script.trim())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    match status {
-        Ok(s) if s.success() => {
-            info!("build_script ran successfully");
-        }
-        Ok(s) => {
-            error!("build_script exited with status: {s}");
-        }
-        Err(e) => {
-            error!("Failed to run build_script: {e}");
-        }
-    }
-
-    Some(now)
-}
 fn main() {
     let config_path = env::args().nth(1);
     let config_path = match config_path {
@@ -126,8 +81,13 @@ fn main() {
             .map(PathBuf::from)
             .collect(),
     );
-    let mut last_build_at: Option<Instant> = None;
-    last_build_at = build_targets(config_json.clone(), last_build_at);
+    // Targets are built in the background: the first cycles may find none, but
+    // the scheduler keeps reporting crashes and coverage while the build runs.
+    let mut builder = Builder::new(
+        config_json.scheduler_name.clone(),
+        config_json.build_script.clone(),
+        config_json.build_script_interval_hours,
+    );
     let mut scheduler = Scheduler::new(
         collector,
         config_json.clone(),
@@ -135,11 +95,15 @@ fn main() {
     );
 
     loop {
-        last_build_at = build_targets(config_json.clone(), last_build_at);
+        if let Some(BuildOutcome::Failure(msg)) = builder.poll() {
+            error!("{msg}");
+        }
         let _ = scheduler.update(&logdir);
         std::thread::sleep(std::time::Duration::from_secs(60));
         scheduler.report_crashes().unwrap();
         scheduler.log_running_tasks();
         scheduler.collect_coverage();
+        scheduler.snapshot_coverage_if_due();
+        scheduler.report_status();
     }
 }

@@ -60,6 +60,7 @@ fn directory_collector() {
         has_coverage: false,
         llvm_bin_directory: None,
         state_file: None,
+        coverage_snapshot_interval_minutes: None,
     };
 
     let mut scheduler = Scheduler::new(collector, config, None);
