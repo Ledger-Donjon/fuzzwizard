@@ -101,6 +101,63 @@ fn a_rejected_script_is_reported_once_per_interval() {
     assert!(builder.poll().is_none(), "the rejection must not repeat");
 }
 
+/// Without an interval every poll is a rebuild, so this is where a rejection
+/// would otherwise repeat every cycle.
+#[test]
+fn a_rejected_script_without_interval_is_reported_once() {
+    let mut builder = Builder::new("relative".to_string(), "./build.sh".to_string(), None);
+
+    assert!(matches!(builder.poll(), Some(BuildOutcome::Failure(_))));
+    assert!(builder.poll().is_none(), "the rejection must not repeat");
+    assert!(builder.poll().is_none(), "the rejection must not repeat");
+}
+
+#[test]
+fn reconfiguring_retries_a_rejected_script() {
+    let dir = assert_fs::TempDir::new().unwrap();
+    let script = executable_script(&dir, "ok.sh", "#!/bin/sh\nexit 0\n");
+
+    let mut builder = Builder::new("fixed".to_string(), "./build.sh".to_string(), None);
+    assert!(matches!(builder.poll(), Some(BuildOutcome::Failure(_))));
+
+    builder.reconfigure(script, None);
+    assert_eq!(wait_for_outcome(&mut builder), BuildOutcome::Success);
+}
+
+/// A config reload must not detach the build in flight and start a second
+/// one writing to the same targets directory.
+#[test]
+fn reconfiguring_keeps_the_running_build() {
+    let dir = assert_fs::TempDir::new().unwrap();
+    let old = executable_script(&dir, "slow.sh", "#!/bin/sh\nsleep 1\n");
+    let marker = dir.child("new_script_ran");
+    let new = executable_script(
+        &dir,
+        "new.sh",
+        &format!("#!/bin/sh\ntouch '{}'\n", marker.path().display()),
+    );
+
+    let mut builder = Builder::new("slow".to_string(), old, Some(24));
+    assert!(builder.poll().is_none());
+    assert!(builder.is_building());
+    let started = builder.running_since();
+
+    builder.reconfigure(new, Some(24));
+    assert!(builder.is_building());
+    assert_eq!(builder.running_since(), started, "no new build was started");
+    assert_eq!(wait_for_outcome(&mut builder), BuildOutcome::Success);
+    assert!(!builder.is_building());
+    assert!(!marker.path().exists());
+
+    // The new script must not wait for the 24h interval of the old one.
+    assert_eq!(wait_for_outcome(&mut builder), BuildOutcome::Success);
+    assert!(marker.path().exists(), "the new script should have run");
+    assert!(
+        builder.poll().is_none(),
+        "the interval applies again after the new build"
+    );
+}
+
 #[test]
 fn a_missing_script_is_reported_as_a_failure() {
     let missing = Path::new("/nonexistent/fuzzwizard/build.sh");

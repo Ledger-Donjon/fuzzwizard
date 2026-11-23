@@ -120,20 +120,19 @@ pub(super) fn embedded_source_paths(
 }
 
 /// Collect the base mounts needed for coverage commands: `coverage_dir` (rw)
-/// and each binary's parent directory (ro, only if it lives outside `coverage_dir`).
+/// and each binary outside it (ro). The binary file is mounted rather than its
+/// directory, which may hold anything, up to a whole home directory.
 pub(super) fn coverage_mounts(coverage_dir: &Path, binaries: &[PathBuf]) -> Vec<Mount> {
     let mut mounts = vec![Mount {
         host_path: coverage_dir.to_path_buf(),
         read_only: false,
     }];
     for binary in binaries {
-        if let Some(bin_dir) = binary.parent() {
-            if !bin_dir.starts_with(coverage_dir) {
-                mounts.push(Mount {
-                    host_path: bin_dir.to_path_buf(),
-                    read_only: true,
-                });
-            }
+        if !binary.starts_with(coverage_dir) {
+            mounts.push(Mount {
+                host_path: binary.clone(),
+                read_only: true,
+            });
         }
     }
     mounts

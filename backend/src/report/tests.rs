@@ -184,6 +184,29 @@ fn heartbeat_accepts_a_missing_started_at() {
     );
 }
 
+/// The start time is derived from the backend clock, so a scheduler in another
+/// timezone cannot shift it.
+#[test]
+fn heartbeat_start_time_comes_from_the_uptime() {
+    let payload: FuzzerStatusHeartbeat = serde_json::from_str(
+        r#"{"scheduler_name":"s","fuzzers":[{"sha":"ab","path":"/t/f","status":"running","started_at":"2026-08-06T15:00:00","uptime_seconds":3600}]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        payload.fuzzers[0].started_at(ts("2026-08-06 13:00:00")),
+        Some(ts("2026-08-06 12:00:00"))
+    );
+
+    let legacy: FuzzerStatusHeartbeat = serde_json::from_str(
+        r#"{"scheduler_name":"s","fuzzers":[{"sha":"ab","path":"/t/f","status":"running","started_at":"2026-08-06T12:59:48"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        legacy.fuzzers[0].started_at(ts("2026-08-06 13:00:00")),
+        Some(ts("2026-08-06 12:59:48"))
+    );
+}
+
 #[test]
 fn long_paths_keep_their_tail() {
     assert_eq!(shorten_path("/src/a.rs"), "/src/a.rs");

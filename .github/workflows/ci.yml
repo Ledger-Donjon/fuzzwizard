@@ -41,9 +41,8 @@ jobs:
     - name: Build
       run: cargo build --verbose
 
-    # TODO
-    # - name: Run tests
-    #   run: cargo test --verbose
+    - name: Run tests
+      run: cargo test --verbose
 
     - name: Check formatting
       run: cargo fmt --check

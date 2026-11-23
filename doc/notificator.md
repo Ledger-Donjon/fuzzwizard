@@ -120,6 +120,7 @@ The notificator uses a state file to track the last processed crash:
 - **Format**: ISO datetime string: `YYYY-MM-DD HH:MM:SS.ffffff`
 - **Initialization**: If missing, fetches last crash from database
 - **Locking**: Uses exclusive file locking to prevent race conditions
+- **Permissions**: Created with mode `600`; the notificator refuses to start if the file is a symlink, belongs to another user, or is writable by group or others
 
 
 ## Usage

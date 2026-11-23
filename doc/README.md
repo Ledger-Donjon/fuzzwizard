@@ -49,7 +49,7 @@ Fuzzwizard is composed of several components that work together to provide a com
 ### Communication protocols
 
 - **HTTP REST** : Communication between schedulers and backend (`POST /crashes`, `GET /crashes`)
-- **JSON files** : Shared state files to control fuzzers (`/tmp/{scheduler_name}_state.json`)
+- **JSON files** : Shared state files to control fuzzers (`~/.fuzzwizard/{scheduler_name}_state.json`)
 - **Slack API** : Alerts via `chat.postMessage` (via notificator)
 - **mpsc channels** : Internal communication in fuzztui (threads)
 

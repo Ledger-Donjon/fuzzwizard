@@ -20,7 +20,9 @@ The state file provides a way to:
 
 ## Configuration
 
-The `state_file` field is **optional** in your scheduler configuration, if `state_file` is not defined, the scheduler will automatically use `/tmp/{scheduler_name}_state.json` as the default path.
+The `state_file` field is **optional** in your scheduler configuration, if `state_file` is not defined, the scheduler will automatically use `~/.fuzzwizard/{scheduler_name}_state.json` as the default path.
+
+**Permissions**: the state file sets the environment of the fuzzers, so the scheduler writes it with mode `600` and refuses to use it if it is a symlink, belongs to another user, or is writable by group or others. Avoid shared directories such as `/tmp`; if you edit the file by hand, keep it private (`chmod 600`).
 
 **On startup**: The scheduler always creates an empty state file, overwriting any existing file. This ensures a clean state on each launch.
 
@@ -171,7 +173,7 @@ You can combine both environment variables and command options:
 The state file can be read to see the current status of all fuzzing tasks:
 
 ```bash
-cat /tmp/my_scheduler_state.json | jq
+cat ~/.fuzzwizard/my_scheduler_state.json | jq
 ```
 
 This will show all running, crashed, and stopped fuzzers with their current configuration.
@@ -182,7 +184,7 @@ The `container_name` field allows you to easily attach to running fuzzer contain
 
 ```bash
 # Get container name from state file
-CONTAINER=$(cat /tmp/my_scheduler_state.json | jq -r '.fuzzers[0].container_name')
+CONTAINER=$(cat ~/.fuzzwizard/my_scheduler_state.json | jq -r '.fuzzers[0].container_name')
 
 # Attach to container
 docker attach $CONTAINER

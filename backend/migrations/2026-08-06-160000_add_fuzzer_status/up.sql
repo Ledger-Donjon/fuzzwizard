@@ -9,7 +9,8 @@ CREATE TABLE fuzzer_status (
     fuzzer_path TEXT NOT NULL,
     -- One of: running, crashed, stopped
     status TEXT NOT NULL,
-    -- Wall-clock start time, derived by the scheduler from its monotonic clock
+    -- Start time on the database clock, derived from the uptime the scheduler
+    -- reports
     started_at TIMESTAMP,
     last_seen_at TIMESTAMP NOT NULL DEFAULT NOW(),
     UNIQUE (scheduler_name, fuzzer_sha)

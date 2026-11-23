@@ -8,7 +8,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -22,7 +23,7 @@ use serde::Serialize;
 use crate::backend::http_client;
 use crate::backend::post_to_backend;
 use crate::collector::Sha;
-use crate::process::{kill_process_by_pid, remove_container, PROCESS_REGISTRY};
+use crate::process::{kill_process_group, kill_record, remove_container, PROCESS_REGISTRY};
 use crate::types::{CrashReport, ProcessRecord, Task, TaskStatus, TaskStatusInfo};
 use crate::HEARTBEAT_TIMEOUT;
 use crate::{validation, Result, Scheduler, SchedulerError, TargetsCollector};
@@ -37,7 +38,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                 warn!("Container name present but container binary not configured");
             }
         } else if task.child.try_wait().is_ok() {
-            kill_process_by_pid(task.child.id());
+            kill_process_group(task.child.id());
         }
     }
 
@@ -85,17 +86,19 @@ impl<C: TargetsCollector> Scheduler<C> {
             self.last_snapshot_at = Some(Instant::now());
         }
 
+        // `self.targets` is updated one target at a time, so that it always
+        // lists exactly the targets that have a task: a target whose start
+        // failed is left out and retried on the next cycle.
         for target in targets_to_stop {
             info!("stopping task: {target:x?}");
             if let Some(mut task) = self.tasks.remove(&target) {
                 self.kill_task(&mut task);
                 info!("removing task: {target:?}");
-                let _ = self.write_state_file();
             } else {
-                return Err(SchedulerError::InconsistentState(
-                    "task missing during stop",
-                ));
+                warn!("no task to stop for target 0x{}", hex::encode(target));
             }
+            self.targets.remove(&target);
+            let _ = self.write_state_file();
         }
 
         let mut logfile = fs::OpenOptions::new()
@@ -103,56 +106,77 @@ impl<C: TargetsCollector> Scheduler<C> {
             .append(true)
             .open(format!("{logdir}/running_tasks.log"))?;
 
+        let mut first_error = None;
+
         for target in targets_to_start {
             let Some(path) = latest_targets.get(&target) else {
-                return Err(SchedulerError::InconsistentState(
-                    "missing start target path",
-                ));
+                continue;
             };
-            let (var_env, cmd_options) = self.get_task_options_from_state_file(target)?;
-            let fuzzer_path = path.canonicalize()?;
-            let task =
-                self.start_task(fuzzer_path, target, var_env.as_ref(), cmd_options.as_ref())?;
-            self.tasks.insert(target, task);
-            let current_date = Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
-            writeln!(
-                logfile,
-                "[{}]{} : 0x{}",
-                current_date,
-                path.display(),
-                hex::encode(target)
-            )?;
+            match self.spawn_target(target, path) {
+                Ok(()) => {
+                    self.targets.insert(target, path.clone());
+                    let current_date = Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
+                    writeln!(
+                        logfile,
+                        "[{}]{} : 0x{}",
+                        current_date,
+                        path.display(),
+                        hex::encode(target)
+                    )?;
+                }
+                Err(e) => {
+                    warn!("failed to start {}: {e}", path.display());
+                    first_error.get_or_insert(e);
+                }
+            }
             let _ = self.write_state_file();
         }
 
         for target in targets_to_check {
-            if self.targets.get(&target) == latest_targets.get(&target) {
+            let Some(path) = latest_targets.get(&target) else {
+                continue;
+            };
+            if self.targets.get(&target) == Some(path) {
                 continue;
             }
 
             if let Some(mut task) = self.tasks.remove(&target) {
-                task.child.kill()?;
-            } else {
-                return Err(SchedulerError::InconsistentState(
-                    "task missing during restart",
-                ));
+                self.kill_task(&mut task);
             }
+            self.targets.remove(&target);
 
-            let Some(path) = latest_targets.get(&target) else {
-                return Err(SchedulerError::InconsistentState(
-                    "missing restart target path",
-                ));
-            };
-            let (var_env, cmd_options) = self.get_task_options_from_state_file(target)?;
-            let fuzzer_path = path.canonicalize()?;
-            let task =
-                self.start_task(fuzzer_path, target, var_env.as_ref(), cmd_options.as_ref())?;
-            self.tasks.insert(target, task);
+            match self.spawn_target(target, path) {
+                Ok(()) => {
+                    self.targets.insert(target, path.clone());
+                }
+                Err(e) => {
+                    warn!("failed to restart {}: {e}", path.display());
+                    first_error.get_or_insert(e);
+                }
+            }
             let _ = self.write_state_file();
         }
 
-        self.targets = latest_targets;
+        first_error.map_or(Ok(()), Err)
+    }
+
+    /// Start the fuzzer of `target` with its options from the state file.
+    fn spawn_target(&mut self, target: Sha, path: &Path) -> Result<()> {
+        let (var_env, cmd_options) = self.get_task_options_from_state_file(target)?;
+        let fuzzer_path = path.canonicalize()?;
+        let task = self.start_task(fuzzer_path, target, var_env.as_ref(), cmd_options.as_ref())?;
+        self.insert_task(target, task);
         Ok(())
+    }
+
+    /// Record `task` as the task of `sha`, killing the one it replaces: a
+    /// dropped `Child` is not killed, it would keep fuzzing unsupervised.
+    pub(crate) fn insert_task(&mut self, sha: Sha, task: Task) {
+        if let Some(mut previous) = self.tasks.insert(sha, task) {
+            if previous.status == TaskStatus::Running {
+                self.kill_task(&mut previous);
+            }
+        }
     }
 
     pub(crate) fn start_task(
@@ -247,6 +271,15 @@ impl<C: TargetsCollector> Scheduler<C> {
                         .map_err(SchedulerError::InvalidInput)?,
                 );
 
+                // Everything after the image is passed to the fuzzer, so the
+                // environment must be set before it.
+                if let Some(env_vars) = var_env {
+                    for (key, value) in env_vars {
+                        args.push("-e".into());
+                        args.push(format!("{key}={value}"));
+                    }
+                }
+
                 args.push(container_image.clone());
 
                 args.push("/fuzzer/binary".into());
@@ -257,12 +290,6 @@ impl<C: TargetsCollector> Scheduler<C> {
                     args.extend(custom_opts.iter().cloned());
                 }
 
-                if let Some(env_vars) = var_env {
-                    for (key, value) in env_vars {
-                        args.push("-e".into());
-                        args.push(format!("{key}={value}"));
-                    }
-                }
                 let mut cmd = Command::new(binary);
                 cmd.args(args.iter().map(|s| s.as_str()));
 
@@ -301,6 +328,9 @@ impl<C: TargetsCollector> Scheduler<C> {
 
             let mut cmd = Command::new(&fuzzer_path);
             cmd.args(&args);
+            // Its own process group, so that signals reach the workers it
+            // forks and nothing else.
+            cmd.process_group(0);
 
             if let Some(env_vars) = var_env {
                 for (key, value) in env_vars {
@@ -390,7 +420,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                     remove_container(binary, name);
                 }
             }
-            kill_process_by_pid(rec.pid);
+            kill_record(rec);
         }
 
         if let Some(reg) = PROCESS_REGISTRY.get() {
@@ -618,12 +648,15 @@ impl<C: TargetsCollector> Scheduler<C> {
 
     /// Report the status of every known fuzzer to the backend.
     pub fn report_status(&self) {
+        /// The start time is sent as an elapsed duration, not a timestamp: the
+        /// backend dates it with its own (UTC) clock, whatever the timezone
+        /// and clock drift of the scheduler host.
         #[derive(Serialize)]
         struct FuzzerStatusInput {
             sha: String,
             path: String,
             status: &'static str,
-            started_at: Option<NaiveDateTime>,
+            uptime_seconds: Option<u64>,
         }
 
         #[derive(Serialize)]
@@ -632,7 +665,6 @@ impl<C: TargetsCollector> Scheduler<C> {
             fuzzers: Vec<FuzzerStatusInput>,
         }
 
-        let now = Local::now().naive_local();
         let mut fuzzers = Vec::with_capacity(self.targets.len().max(self.tasks.len()));
 
         for (sha, task) in &self.tasks {
@@ -641,14 +673,11 @@ impl<C: TargetsCollector> Scheduler<C> {
                 TaskStatus::Crashed => "crashed",
                 TaskStatus::Stopped => "stopped",
             };
-            let started_at = TimeDelta::from_std(task.started_at.elapsed())
-                .ok()
-                .map(|elapsed| now - elapsed);
             fuzzers.push(FuzzerStatusInput {
                 sha: hex::encode(sha),
                 path: task.path.display().to_string(),
                 status,
-                started_at,
+                uptime_seconds: Some(task.started_at.elapsed().as_secs()),
             });
         }
 
@@ -658,7 +687,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                     sha: hex::encode(sha),
                     path: path.display().to_string(),
                     status: "stopped",
-                    started_at: None,
+                    uptime_seconds: None,
                 });
             }
         }

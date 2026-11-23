@@ -84,6 +84,7 @@ async fn main() {
         .route("/crashes/last/{number}", get(crashes::get_last_n_crashes))
         .route("/crashes/count", get(crashes::get_crashes_count))
         .route("/crashes/ids", get(crashes::get_crash_ids))
+        .route("/crashes/metadata", get(crashes::get_crash_metadata_after))
         .route("/crashes", post(crashes::upload_crash))
         .route("/crashes/{id}", get(crashes::get_crash_by_id))
         .route("/collect_crashes", post(crashes::collect_crashes))

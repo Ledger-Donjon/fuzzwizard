@@ -31,12 +31,22 @@ pub(crate) struct MaintenancePreviewResponse {
     coverage_files_count: i64,
 }
 
+/// Paths locked by a snapshot being inserted are about to be referenced again:
+/// they are skipped rather than waited for.
 fn prune_orphan_paths(conn: &mut PgConnection) -> i64 {
-    let orphans = coverage_paths::table.filter(not(exists(
-        coverage_files::table.filter(coverage_files::path_id.eq(coverage_paths::id)),
-    )));
+    let orphans = coverage_paths::table
+        .filter(not(exists(
+            coverage_files::table.filter(coverage_files::path_id.eq(coverage_paths::id)),
+        )))
+        .select(coverage_paths::id)
+        .for_update()
+        .skip_locked();
 
-    match diesel::delete(orphans).execute(conn) {
+    let pruned = conn.transaction(|conn| {
+        let ids: Vec<i32> = orphans.load(conn)?;
+        diesel::delete(coverage_paths::table.filter(coverage_paths::id.eq_any(&ids))).execute(conn)
+    });
+    match pruned {
         Ok(deleted) => deleted as i64,
         Err(e) => {
             error!("Failed to prune orphan coverage paths: {e}");

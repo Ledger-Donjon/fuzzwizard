@@ -219,7 +219,7 @@ Each scheduler has its own configuration file that defines what to fuzz and how.
 Unique name for the scheduler.
 
 - Used to identify the scheduler in logs
-- Used to name the default state file: `/tmp/{scheduler_name}_state.json`
+- Used to name the default state file: `~/.fuzzwizard/{scheduler_name}_state.json`
 - Used to identify crashes in the backend
 
 **Example**: `"my_scheduler"`, `"project-a-scheduler"`
@@ -397,7 +397,7 @@ Additional options to pass to the container.
 
 Path to the shared state file.
 
-- If not set, uses `/tmp/{scheduler_name}_state.json` by default
+- If not set, uses `~/.fuzzwizard/{scheduler_name}_state.json` by default
 - Allows manual control of fuzzers (START/STOP/RESTART)
 - See [state_file.md](state_file.md) for more details
 

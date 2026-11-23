@@ -258,6 +258,7 @@ done
 
     // Update should write the current state to the state file
     let result = scheduler.update(log_dir.to_str().unwrap());
+    scheduler.kill_tasks();
     assert!(result.is_ok(), "update after STOP should succeed");
 }
 

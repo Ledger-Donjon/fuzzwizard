@@ -24,8 +24,6 @@ CREATE TABLE coverage_metrics (
     metric_name TEXT NOT NULL,
     covered INT NOT NULL,
     total INT NOT NULL,
+    -- Also serves lookups by snapshot_id, its leading column.
     UNIQUE (snapshot_id, metric_name)
 );
-
-CREATE INDEX idx_coverage_metrics_snapshot
-    ON coverage_metrics (snapshot_id);

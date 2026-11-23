@@ -37,25 +37,46 @@ pub struct Builder {
     /// launcher that owns the builder is shared across threads and a
     /// `mpsc::Receiver` is not `Sync`.
     running: Option<JoinHandle<BuildOutcome>>,
+    /// The script failed validation. It is not retried until
+    /// [`Self::reconfigure`] installs a new one.
+    rejected: bool,
+    /// Set by [`Self::reconfigure`]: the next build is due regardless of the
+    /// interval, even if a build of the previous script ends in between.
+    rebuild_pending: bool,
 }
 
 impl Builder {
     /// An interval of `None` or `0` hours rebuilds on every poll, which is what
     /// a scheduler without `build_script_interval_hours` has always done.
     pub fn new(scheduler_name: String, script: String, interval_hours: Option<u64>) -> Self {
-        let interval = match interval_hours {
-            Some(hours) if hours > 0 => Some(Duration::from_secs(hours.saturating_mul(3600))),
-            _ => None,
-        };
-
         Builder {
             scheduler_name,
             script,
-            interval,
+            interval: interval_from_hours(interval_hours),
             last_build_at: None,
             started_at: None,
             running: None,
+            rejected: false,
+            rebuild_pending: false,
         }
+    }
+
+    /// Install a new script and interval, as after a config reload.
+    ///
+    /// A build in flight is kept rather than detached, so two builds never
+    /// write to the same targets directory. The next build is due as soon as
+    /// the current one, if any, has finished.
+    pub fn reconfigure(&mut self, script: String, interval_hours: Option<u64>) {
+        self.script = script;
+        self.interval = interval_from_hours(interval_hours);
+        self.rejected = false;
+        self.rebuild_pending = true;
+    }
+
+    /// Whether a build is running. The targets directory may then be in any
+    /// intermediate state and must not be scanned.
+    pub fn is_building(&self) -> bool {
+        self.running.is_some()
     }
 
     /// When the last build finished, if one ever did.
@@ -101,8 +122,11 @@ impl Builder {
     }
 
     fn is_due(&self) -> bool {
-        if self.script.trim().is_empty() {
+        if self.rejected || self.script.trim().is_empty() {
             return false;
+        }
+        if self.rebuild_pending {
+            return true;
         }
         match (self.interval, self.last_build_at) {
             // Nothing has been built yet: targets are needed now, not in N hours.
@@ -116,11 +140,12 @@ impl Builder {
     fn start(&mut self) -> Option<BuildOutcome> {
         let script = self.script.trim().to_string();
         let name = self.scheduler_name.clone();
+        self.rebuild_pending = false;
 
         if let Err(e) = validation::validate_build_script(&script) {
-            // A rejected script stays rejected until the config changes, so the
-            // attempt is recorded to keep the interval from replaying it on
-            // every single poll.
+            // A rejected script stays rejected until the config changes:
+            // retrying it would only repeat the same error on every poll.
+            self.rejected = true;
             self.last_build_at = Some(Instant::now());
             return Some(BuildOutcome::Failure(format!(
                 "Build script rejected for {name}: {e}"
@@ -146,6 +171,13 @@ impl Builder {
                 )))
             }
         }
+    }
+}
+
+fn interval_from_hours(interval_hours: Option<u64>) -> Option<Duration> {
+    match interval_hours {
+        Some(hours) if hours > 0 => Some(Duration::from_secs(hours.saturating_mul(3600))),
+        _ => None,
     }
 }
 

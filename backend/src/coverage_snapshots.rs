@@ -243,6 +243,10 @@ pub(crate) async fn create_coverage_snapshot(
     Ok(StatusCode::CREATED)
 }
 
+/// Losing that race twice in a row would take a prune per attempt: three
+/// attempts is plenty.
+const PATH_LOOKUP_ATTEMPTS: usize = 3;
+
 fn insert_coverage_files(
     conn: &mut PgConnection,
     snapshot_id: i32,
@@ -252,25 +256,35 @@ fn insert_coverage_files(
         return Ok(());
     }
 
-    for chunk in files.chunks(1000) {
-        let new_paths: Vec<_> = chunk
+    // Maintenance may prune an orphan path between its insert and its lookup,
+    // so missing paths are inserted again. Once looked up, a path is locked
+    // until the transaction ends: the prune cannot delete it any more.
+    let mut path_ids: HashMap<String, i32> = HashMap::new();
+    for _ in 0..PATH_LOOKUP_ATTEMPTS {
+        let missing: Vec<&str> = files
             .iter()
-            .map(|f| coverage_paths::path.eq(&f.path))
+            .map(|f| f.path.as_str())
+            .filter(|path| !path_ids.contains_key(*path))
             .collect();
-        diesel::insert_into(coverage_paths::table)
-            .values(new_paths)
-            .on_conflict(coverage_paths::path)
-            .do_nothing()
-            .execute(conn)?;
+        if missing.is_empty() {
+            break;
+        }
+        for chunk in missing.chunks(1000) {
+            let new_paths: Vec<_> = chunk.iter().map(|p| coverage_paths::path.eq(*p)).collect();
+            diesel::insert_into(coverage_paths::table)
+                .values(new_paths)
+                .on_conflict(coverage_paths::path)
+                .do_nothing()
+                .execute(conn)?;
+        }
+        path_ids.extend(
+            coverage_paths::table
+                .filter(coverage_paths::path.eq_any(&missing))
+                .select((coverage_paths::path, coverage_paths::id))
+                .for_key_share()
+                .load::<(String, i32)>(conn)?,
+        );
     }
-
-    let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
-    let path_ids: HashMap<String, i32> = coverage_paths::table
-        .filter(coverage_paths::path.eq_any(&paths))
-        .select((coverage_paths::path, coverage_paths::id))
-        .load::<(String, i32)>(conn)?
-        .into_iter()
-        .collect();
 
     for chunk in files.chunks(500) {
         let rows: Vec<_> = chunk

@@ -30,6 +30,6 @@ pub(crate) fn db_now(conn: &mut PgConnection) -> NaiveDateTime {
         .get_result::<NaiveDateTime>(conn)
         .unwrap_or_else(|e| {
             error!("Failed to read database time, falling back to local clock: {e}");
-            chrono::Local::now().naive_local()
+            chrono::Utc::now().naive_utc()
         })
 }

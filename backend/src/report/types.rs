@@ -23,7 +23,25 @@ pub(crate) struct FuzzerStatusInput {
     pub sha: String,
     pub path: String,
     pub status: String,
+    /// Wall-clock start time in the scheduler's timezone. Only sent by older
+    /// schedulers, and used only when `uptime_seconds` is absent.
+    #[serde(default)]
     pub started_at: Option<NaiveDateTime>,
+    #[serde(default)]
+    pub uptime_seconds: Option<u64>,
+}
+
+impl FuzzerStatusInput {
+    /// Start time on the database clock, given the time of the heartbeat.
+    pub(crate) fn started_at(&self, now: NaiveDateTime) -> Option<NaiveDateTime> {
+        match self.uptime_seconds {
+            Some(secs) => i64::try_from(secs)
+                .ok()
+                .and_then(chrono::TimeDelta::try_seconds)
+                .and_then(|uptime| now.checked_sub_signed(uptime)),
+            None => self.started_at,
+        }
+    }
 }
 
 #[derive(Queryable, Selectable)]

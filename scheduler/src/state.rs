@@ -4,6 +4,8 @@
 //! State file read/write methods for [`Scheduler`].
 
 use std::collections::HashMap;
+use std::io::Write;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::{fs, io};
 
@@ -14,6 +16,50 @@ use crate::types::{
     FuzzerStateCommand, FuzzerStateEntry, StateFile, TaskOptionsFromState, TaskStatus,
 };
 use crate::{validation, Result, Scheduler, SchedulerError, TargetsCollector};
+
+/// Replace `path` with `contents`, readable by the scheduler user only.
+///
+/// The state file may sit in a shared directory such as `/tmp`, where another
+/// user can plant a symlink or a file of their own. The temporary file is
+/// therefore created exclusively, which never follows a symlink, and renamed
+/// over the target, which never writes through one.
+pub(crate) fn write_private_file(path: &Path, contents: &str) -> io::Result<()> {
+    let temp_path = path.with_extension("tmp");
+    match fs::remove_file(&temp_path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    let mut temp = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp_path)?;
+    temp.write_all(contents.as_bytes())?;
+    fs::rename(&temp_path, path)
+}
+
+/// The state file sets the environment of the fuzzers (`LD_PRELOAD`
+/// included): only a regular file that no other user can write is trusted.
+fn check_state_file_is_private(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    let reject = |why: &str| {
+        Err(SchedulerError::InvalidInput(format!(
+            "State file {} {why}, refusing to use it",
+            path.display()
+        )))
+    };
+    if !metadata.file_type().is_file() {
+        return reject("is not a regular file");
+    }
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return reject("is owned by another user");
+    }
+    if metadata.mode() & 0o022 != 0 {
+        return reject("is writable by other users");
+    }
+    Ok(())
+}
 
 impl<C: TargetsCollector> Scheduler<C> {
     /// Get var_env and cmd_options for a task from the state file
@@ -49,7 +95,7 @@ impl<C: TargetsCollector> Scheduler<C> {
         let (var_env, cmd_options) = self.get_task_options_from_state_file(sha)?;
 
         let task = self.start_task(fuzzer_path, sha, var_env.as_ref(), cmd_options.as_ref())?;
-        self.tasks.insert(sha, task);
+        self.insert_task(sha, task);
 
         let _ = self.write_state_file();
 
@@ -64,17 +110,19 @@ impl<C: TargetsCollector> Scheduler<C> {
         let _lock = self.state_file_lock.read().map_err(|e| {
             io::Error::other(format!("Failed to acquire read lock on state file: {e}"))
         })?;
-        let contents = match fs::read_to_string(state_path) {
+        let checked = check_state_file_is_private(state_path);
+        let contents = match checked.and_then(|()| Ok(fs::read_to_string(state_path)?)) {
             Ok(c) => c,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            Err(SchedulerError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
                 let empty_state = StateFile {
                     fuzzers: Vec::new(),
                 };
                 if let Ok(json) = serde_json::to_string_pretty(&empty_state) {
-                    let _ = fs::write(state_path, json);
+                    let _ = write_private_file(state_path, &json);
                 }
                 return Ok(Some(empty_state));
             }
+            Err(e @ SchedulerError::InvalidInput(_)) => return Err(e),
             Err(e) => {
                 info!(
                     "Failed to read state file {}: {}, using empty state",
@@ -187,20 +235,18 @@ impl<C: TargetsCollector> Scheduler<C> {
 
         let state_file = StateFile { fuzzers };
 
-        let temp_path = state_path.with_extension("tmp");
         let json = serde_json::to_string_pretty(&state_file).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Failed to serialize state: {e}"),
             )
         })?;
-        fs::write(&temp_path, json)?;
 
         let _lock = self.state_file_lock.write().map_err(|e| {
             io::Error::other(format!("Failed to acquire write lock on state file: {e}"))
         })?;
 
-        fs::rename(&temp_path, state_path)?;
+        write_private_file(state_path, &json)?;
         Ok(())
     }
 }

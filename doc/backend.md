@@ -25,6 +25,7 @@ The backend is a REST API that manages crash storage and retrieval in a PostgreS
 - **`GET /crashes/{id}`**: Get crash by ID, with its `report`, `input` and `program` blobs
 - **`GET /crashes/count`**: Get total crash count
 - **`GET /crashes/ids?after={date}`**: Get crash IDs since date
+- **`GET /crashes/metadata?after={date}`**: Get id, filename, scheduler and date of the crashes since date, oldest first, without their blobs (at most 1000 per call)
 - **`POST /crashes`**: Upload new crash
 - **`POST /collect_crashes`**: Write crash artifacts into a private temp directory (mode `0700`). The JSON response is the directory path.
 

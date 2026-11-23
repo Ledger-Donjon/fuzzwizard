@@ -172,7 +172,7 @@ fn coverage_mounts_binary_outside_coverage_dir() {
     let binaries = vec![PathBuf::from("/opt/targets/fuzzer1")];
     let mounts = coverage_mounts(coverage_dir, &binaries);
     assert_eq!(mounts.len(), 2);
-    assert_eq!(mounts[1].host_path, PathBuf::from("/opt/targets"));
+    assert_eq!(mounts[1].host_path, PathBuf::from("/opt/targets/fuzzer1"));
     assert!(mounts[1].read_only);
 }
 
@@ -260,6 +260,43 @@ fn locate_sources_derives_path_equivalence_when_tree_moved() {
     let flag = loc.flag.expect("moved tree needs a path-equivalence flag");
     assert!(flag.starts_with("-path-equivalence=/build/elsewhere,"));
     assert_eq!(loc.mounts, vec![tmp.path().canonicalize().unwrap()]);
+}
+
+/// System headers are present on the host for nearly every binary: they must
+/// not hide that the project sources were moved.
+#[test]
+fn locate_sources_ignores_system_headers_when_tree_moved() {
+    let tmp = assert_fs::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("parser.c"), "int x;\n").unwrap();
+    let binary = tmp.path().join("fuzzer");
+
+    let embedded = vec![
+        "/usr/bin/env".to_string(),
+        "/build/elsewhere/parser.c".to_string(),
+    ];
+    let loc = locate_sources(&embedded, &[binary]).expect("sources should be located");
+
+    let flag = loc.flag.expect("moved tree needs a path-equivalence flag");
+    assert!(flag.starts_with("-path-equivalence=/build/elsewhere,"));
+    assert_eq!(loc.mounts, vec![tmp.path().canonicalize().unwrap()]);
+}
+
+#[test]
+fn locate_sources_mounts_project_before_system_headers() {
+    let tmp = assert_fs::TempDir::new().unwrap();
+    let src_dir = tmp.path().join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    let source = src_dir.join("parser.c");
+    std::fs::write(&source, "int x;\n").unwrap();
+
+    let embedded = vec![
+        "/usr/bin/env".to_string(),
+        source.to_string_lossy().into_owned(),
+    ];
+    let loc = locate_sources(&embedded, &[tmp.path().join("fuzzer")]).unwrap();
+
+    assert!(loc.flag.is_none());
+    assert_eq!(loc.mounts.first(), Some(&src_dir.canonicalize().unwrap()));
 }
 
 #[test]
@@ -390,7 +427,7 @@ fn coverage_mounts_multi_adds_external_binary_dirs() {
     ];
     let mounts = coverage_mounts(coverage_dir, &binaries);
     assert_eq!(mounts.len(), 2);
-    assert_eq!(mounts[1].host_path, PathBuf::from("/opt/targets"));
+    assert_eq!(mounts[1].host_path, PathBuf::from("/opt/targets/fuzzer_b"));
     assert!(mounts[1].read_only);
 }
 
@@ -429,6 +466,35 @@ fn is_safe_source_mount_rejects_system_directories() {
     assert!(is_safe_source_mount(Path::new("/srv/build/src")));
     assert!(is_safe_source_mount(Path::new("/var/tmp/build/src")));
     assert!(!is_safe_source_mount(Path::new("/var/log/app")));
+}
+
+/// A mapping can name any host file: credentials must not be exposed just
+/// because a binary claims to have been compiled from them.
+#[test]
+fn is_safe_source_mount_rejects_home_roots_and_credentials() {
+    assert!(!is_safe_source_mount(Path::new("/home/user")));
+    assert!(!is_safe_source_mount(Path::new("/home/user/.ssh")));
+    assert!(!is_safe_source_mount(Path::new("/home/user/.config/gh")));
+    assert!(!is_safe_source_mount(Path::new("/srv/ci/.aws")));
+    assert!(is_safe_source_mount(Path::new(
+        "/home/user/.cargo/registry/src"
+    )));
+    if let Some(home) = std::env::var_os("HOME") {
+        assert!(!is_safe_source_mount(Path::new(&home)));
+    }
+}
+
+/// `/usr/src` is a project location, not a system header directory, so its
+/// sources must still be looked for when the tree was moved.
+#[test]
+fn locate_sources_treats_usr_src_as_project_sources() {
+    let tmp = assert_fs::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("parser.c"), "int x;\n").unwrap();
+    let binary = tmp.path().join("fuzzer");
+
+    let embedded = vec!["/usr/src/proj/parser.c".to_string()];
+    let loc = locate_sources(&embedded, &[binary]).expect("moved sources located");
+    assert!(loc.flag.is_some(), "a path-equivalence flag is expected");
 }
 
 #[test]

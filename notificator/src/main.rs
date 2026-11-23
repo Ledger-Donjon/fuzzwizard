@@ -16,6 +16,7 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -70,10 +71,11 @@ fn load_or_init_last_crash_date(
     }
 
     // Check if file exists and is not empty
-    let file_exists = PathBuf::from(state_file_path).exists();
+    let file_exists = fs::symlink_metadata(state_file_path).is_ok();
     let mut contents = String::new();
 
     if file_exists {
+        check_state_file_is_private(state_file_path)?;
         let mut file = OpenOptions::new()
             .read(true)
             .open(state_file_path)
@@ -120,6 +122,23 @@ fn load_or_init_last_crash_date(
     Ok(date)
 }
 
+/// The default state file lives in `/tmp`: a file planted there by another
+/// user could hold a date in the future and silence every crash notification.
+fn check_state_file_is_private(state_file_path: &str) -> Result<()> {
+    let metadata = fs::symlink_metadata(state_file_path).context("Failed to stat state file")?;
+    if !metadata.file_type().is_file() {
+        anyhow::bail!("State file {state_file_path} is not a regular file");
+    }
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        anyhow::bail!("State file {state_file_path} is owned by another user");
+    }
+    if metadata.mode() & 0o022 != 0 {
+        anyhow::bail!("State file {state_file_path} is writable by other users");
+    }
+    Ok(())
+}
+
 /// Save the last notified crash date to the state file
 fn save_last_crash_date(date: NaiveDateTime, state_file_path: &str) -> Result<()> {
     // Create parent directory if necessary
@@ -127,9 +146,15 @@ fn save_last_crash_date(date: NaiveDateTime, state_file_path: &str) -> Result<()
         fs::create_dir_all(parent).context("Failed to create state directory")?;
     }
 
+    if fs::symlink_metadata(state_file_path).is_ok() {
+        check_state_file_is_private(state_file_path)?;
+    }
     let mut file = OpenOptions::new()
         .write(true)
+        .create(true)
         .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(state_file_path)
         .context("Failed to open state file for writing")?;
 

@@ -296,8 +296,7 @@ impl Launcher {
                     sched_proc.path = PathBuf::from(&scheduler.config);
                     sched_proc.started_at = Instant::now();
                     sched_proc.scheduler = scheduler_started;
-                    sched_proc.builder = Builder::new(
-                        sched_proc.name.clone(),
+                    sched_proc.builder.reconfigure(
                         config.build_script.clone(),
                         config.build_script_interval_hours,
                     );
@@ -306,9 +305,11 @@ impl Launcher {
                     sched_proc.info = format!("Scheduler '{}' is active", sched_proc.name.clone());
 
                     info!("Old Scheduler {} updated", sched_proc.name);
-                    let _update = sched_proc
-                        .scheduler
-                        .update(self.config_json.logdir.clone().as_str());
+                    if !sched_proc.builder.is_building() {
+                        let _update = sched_proc
+                            .scheduler
+                            .update(self.config_json.logdir.clone().as_str());
+                    }
                 }
             }
             let already_running = self
@@ -363,9 +364,14 @@ impl Launcher {
             let _ = sched_proc.scheduler.report_crashes();
             sched_proc.scheduler.collect_coverage();
 
-            let _update = sched_proc
-                .scheduler
-                .update(self.config_json.logdir.clone().as_str());
+            // While the script runs, the targets directory may be empty or
+            // hold half-copied binaries: scanning it would stop or break
+            // every fuzzer.
+            if !sched_proc.builder.is_building() {
+                let _update = sched_proc
+                    .scheduler
+                    .update(self.config_json.logdir.clone().as_str());
+            }
 
             sched_proc.scheduler.snapshot_coverage_if_due();
             sched_proc.scheduler.report_status();

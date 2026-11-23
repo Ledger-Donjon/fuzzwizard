@@ -14,14 +14,46 @@ use crate::types::ProcessRecord;
 pub(crate) static PROCESS_REGISTRY: OnceLock<Arc<Mutex<Vec<ProcessRecord>>>> = OnceLock::new();
 
 pub(crate) fn kill_process_by_pid(pid: u32) {
-    let _ = thread::spawn(move || {
-        let _ = Command::new("/bin/kill")
-            .args(["-TERM", &pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .and_then(|mut child| child.wait());
-    });
+    send_term(pid.to_string());
+}
+
+/// Terminate a host fuzzer together with the workers it forked (`-jobs`),
+/// which live in the process group it leads.
+pub(crate) fn kill_process_group(pgid: u32) {
+    send_term(process_group_target(pgid));
+}
+
+/// Stop the process of a registry record: a host fuzzer leads its own
+/// process group, the client of a containerised one does not.
+pub(crate) fn kill_record(rec: &ProcessRecord) {
+    if rec.container_name.is_some() {
+        kill_process_by_pid(rec.pid);
+    } else {
+        kill_process_group(rec.pid);
+    }
+}
+
+/// Synchronous, unlike [`remove_container`]: `kill` returns at once, and the
+/// signal must be sent before a caller that is about to exit does so.
+fn send_term(target: String) {
+    let _ = Command::new("/bin/kill")
+        .args(["-TERM", "--", &target])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// `kill` argument addressing the whole process group `pgid`.
+pub(crate) fn process_group_target(pgid: u32) -> String {
+    format!("-{pgid}")
+}
+
+/// Command sending `SIGUSR1` to every process of the group led by a host
+/// fuzzer, and to nothing else.
+pub(crate) fn flush_group_command(pgid: u32) -> Command {
+    let mut command = Command::new("/bin/kill");
+    command.args(["-USR1", "--", &process_group_target(pgid)]);
+    command
 }
 
 pub(crate) fn remove_container(binary: &Path, name: &str) {
@@ -68,17 +100,18 @@ pub(crate) fn resolve_profraw_paths(pattern: &Path) -> Vec<PathBuf> {
 }
 
 /// File name of a fuzzer binary, used to derive its per-fuzzer directories.
-pub(crate) fn fuzzer_name_of(path: &Path) -> &str {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("unknown")
+///
+/// There is deliberately no placeholder for a path without a UTF-8 file
+/// name: two such fuzzers would share, and corrupt, the same directories.
+pub(crate) fn fuzzer_name_of(path: &Path) -> Option<&str> {
+    path.file_name().and_then(|name| name.to_str())
 }
 
 /// Ask a fuzzer to flush its `.profraw` by sending it `SIGUSR1`.
 ///
 /// libFuzzer dumps the profile on that signal, which is the only way to read
-/// coverage without stopping the campaign. The call is bounded because `pkill`
-/// goes through the container runtime, which can hang on a wedged daemon.
+/// coverage without stopping the campaign. The call is bounded because for
+/// containers it goes through the runtime, which can hang on a wedged daemon.
 pub(crate) fn flush_coverage(mut command: Command, subject: &str, timeout: Duration) {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
@@ -140,7 +173,7 @@ pub(crate) fn install_ctrlc_handler() {
                             .status()
                     });
             };
-            kill_process_by_pid(rec.pid);
+            kill_record(rec);
         }
         thread::sleep(Duration::from_millis(100));
         std::process::exit(130);

@@ -90,6 +90,7 @@ done
 
     // Verify tasks exist
     let tasks = scheduler.get_tasks_with_status();
+    scheduler.kill_tasks();
     assert!(!tasks.is_empty(), "should have at least one task");
 }
 

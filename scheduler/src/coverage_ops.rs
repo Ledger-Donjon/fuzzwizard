@@ -7,8 +7,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Instant;
 
@@ -18,10 +18,20 @@ use sha3::{Digest, Sha3_256};
 use crate::backend::SnapshotJob;
 use crate::collector::Sha;
 use crate::coverage;
-use crate::process::{flush_coverage, fuzzer_name_of, resolve_profraw_paths};
+use crate::process::{flush_coverage, flush_group_command, fuzzer_name_of, resolve_profraw_paths};
 use crate::types::{Task, TaskStatus};
-use crate::{validation, Scheduler, TargetsCollector};
-use crate::{COVERAGE_FLUSH_TIMEOUT, FIRST_SNAPSHOT_DELAY, PROJECT_PROFDATA, SNAPSHOT_PROFDATA};
+use crate::{snapshot_due_at, validation, Scheduler, TargetsCollector};
+use crate::{COVERAGE_FLUSH_TIMEOUT, PROJECT_PROFDATA, SNAPSHOT_PROFDATA};
+
+/// Clears the "snapshot running" flag when the snapshot thread ends, even by
+/// panicking, so that one failed snapshot does not disable all later ones.
+struct SnapshotRunningGuard(Arc<AtomicBool>);
+
+impl Drop for SnapshotRunningGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
 
 impl<C: TargetsCollector> Scheduler<C> {
     pub fn collect_coverage(&self) {
@@ -50,12 +60,9 @@ impl<C: TargetsCollector> Scheduler<C> {
                     warn!("Cannot flush coverage of container {name}: no container binary set");
                 }
                 (None, _) => {
-                    let mut command = Command::new("/usr/bin/pkill");
-                    let fuzzer_name = fuzzer_name_of(&task.path);
-                    command.args(["-SIGUSR1", "-f", fuzzer_name]);
                     flush_coverage(
-                        command,
-                        &format!("fuzzer {fuzzer_name}"),
+                        flush_group_command(task.child.id()),
+                        &format!("fuzzer {}", task.path.display()),
                         COVERAGE_FLUSH_TIMEOUT,
                     );
                 }
@@ -100,16 +107,15 @@ impl<C: TargetsCollector> Scheduler<C> {
     fn instrumented_binary(&self, sha: &Sha, task: &Task) -> Option<PathBuf> {
         let copy = self
             .task_coverage_directory(task)
-            .join(format!("fuzzer_{}.bin", hex::encode(sha)));
-        if copy.exists() {
-            Some(copy)
-        } else {
-            task.path.exists().then(|| task.path.clone())
+            .map(|dir| dir.join(format!("fuzzer_{}.bin", hex::encode(sha))));
+        match copy {
+            Some(copy) if copy.exists() => Some(copy),
+            _ => task.path.exists().then(|| task.path.clone()),
         }
     }
 
-    fn task_coverage_directory(&self, task: &Task) -> PathBuf {
-        self.coverage_directory.join(fuzzer_name_of(&task.path))
+    fn task_coverage_directory(&self, task: &Task) -> Option<PathBuf> {
+        fuzzer_name_of(&task.path).map(|name| self.coverage_directory.join(name))
     }
 
     fn coverage_request<'a>(
@@ -152,10 +158,13 @@ impl<C: TargetsCollector> Scheduler<C> {
             .tasks
             .get(sha)
             .ok_or_else(|| format!("Task not found for SHA: 0x{}", hex::encode(sha)))?;
+        let coverage_dir = self
+            .task_coverage_directory(task)
+            .ok_or_else(|| format!("Invalid fuzzer file name: {:?}", task.path))?;
 
         self.coverage_request(
             std::iter::once((sha, task)),
-            self.task_coverage_directory(task),
+            coverage_dir,
             "coverage.profdata",
         )
     }
@@ -176,6 +185,7 @@ impl<C: TargetsCollector> Scheduler<C> {
 
     /// Coverage summary for a single fuzzer, or the reason there is none.
     pub fn get_task_coverage(&self, sha: &Sha) -> String {
+        let _query = self.lock_coverage_query();
         match self.task_coverage_request(sha) {
             Ok(request) => {
                 let title = format!("Coverage Analysis for: 0x{}", hex::encode(sha));
@@ -187,6 +197,7 @@ impl<C: TargetsCollector> Scheduler<C> {
 
     /// Coverage summary merging every fuzzer this scheduler manages.
     pub fn get_project_coverage(&self) -> String {
+        let _query = self.lock_coverage_query();
         match self.project_coverage_request(PROJECT_PROFDATA) {
             Ok(request) => {
                 let title = format!(
@@ -203,6 +214,7 @@ impl<C: TargetsCollector> Scheduler<C> {
     /// Project-wide annotated source for one file, or for all of them when
     /// `file_path` is `None`.
     pub fn get_project_file_coverage(&self, file_path: Option<&Path>) -> String {
+        let _query = self.lock_coverage_query();
         match self.project_coverage_request(PROJECT_PROFDATA) {
             Ok(request) => request.annotated_source(file_path),
             Err(e) => e,
@@ -226,9 +238,8 @@ impl<C: TargetsCollector> Scheduler<C> {
             return;
         };
 
-        let due = match self.last_snapshot_at {
-            None => self.started_at + FIRST_SNAPSHOT_DELAY.min(interval),
-            Some(prev) => prev + interval,
+        let Some(due) = snapshot_due_at(self.started_at, self.last_snapshot_at, interval) else {
+            return;
         };
         if Instant::now() < due {
             return;
@@ -268,10 +279,10 @@ impl<C: TargetsCollector> Scheduler<C> {
             backend_url: self.backend_url.clone(),
         };
 
-        let running = Arc::clone(&self.snapshot_running);
+        let guard = SnapshotRunningGuard(Arc::clone(&self.snapshot_running));
         thread::spawn(move || {
+            let _guard = guard;
             job.run();
-            running.store(false, Ordering::SeqCst);
         });
         true
     }
@@ -279,9 +290,18 @@ impl<C: TargetsCollector> Scheduler<C> {
     /// Annotated source for one file of a fuzzer.
     pub fn get_task_file_coverage(&self, sha: &Sha, file_path: Option<&Path>) -> String {
         info!("Start file coverage for: {file_path:?}");
+        let _query = self.lock_coverage_query();
         match self.task_coverage_request(sha) {
             Ok(request) => request.annotated_source(file_path),
             Err(e) => e,
         }
+    }
+
+    /// The lock only guards files on disk, so a query that panicked holding
+    /// it leaves nothing inconsistent behind: poisoning is ignored.
+    fn lock_coverage_query(&self) -> MutexGuard<'_, ()> {
+        self.coverage_query_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }

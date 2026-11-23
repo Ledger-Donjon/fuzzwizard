@@ -52,16 +52,19 @@ struct ResolvedRequest {
 }
 
 impl CoverageRequest {
-    fn resolve(&self) -> Result<ResolvedRequest, String> {
+    fn merge(&self) -> Result<PathBuf, String> {
         let profraw_refs: Vec<&Path> = self.profraw_paths.iter().map(PathBuf::as_path).collect();
         let profdata_out = self.coverage_dir.join(&self.profdata_name);
-        let profdata = merge_profdata(
+        merge_profdata(
             &profraw_refs,
             &profdata_out,
             &self.coverage_dir,
             &self.runner,
-        )?;
+        )
+    }
 
+    fn resolve(&self) -> Result<ResolvedRequest, String> {
+        let profdata = self.merge()?;
         let embedded =
             embedded_source_paths(&profdata, &self.binaries, &self.runner, &self.coverage_dir);
         let source_loc = locate_sources(&embedded, &self.source_anchors);
@@ -141,9 +144,11 @@ impl CoverageRequest {
         if self.profraw_paths.is_empty() || self.binaries.is_empty() {
             return None;
         }
-        let resolved = self.resolve().ok()?;
+        // The summary export reads no source file, so locating the sources
+        // (another full export) would be wasted work.
+        let profdata = self.merge().ok()?;
         let json = export_json(
-            &resolved.profdata,
+            &profdata,
             &self.binaries,
             &self.runner,
             &self.coverage_dir,

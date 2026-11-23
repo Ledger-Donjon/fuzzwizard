@@ -21,8 +21,8 @@ CREATE TABLE coverage_files (
     regions_total INT NOT NULL,
     branches_covered INT NOT NULL,
     branches_total INT NOT NULL,
+    -- Also serves lookups by snapshot_id, its leading column.
     UNIQUE (snapshot_id, path_id)
 );
 
-CREATE INDEX idx_coverage_files_snapshot ON coverage_files (snapshot_id);
 CREATE INDEX idx_coverage_files_path ON coverage_files (path_id);

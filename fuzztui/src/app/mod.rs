@@ -184,8 +184,10 @@ impl App {
             }
         }
 
-        let mut ids_url = Url::parse("http://127.0.0.1:3000/crashes/ids").map_err(|_| ())?;
-        ids_url.query_pairs_mut().append_pair(
+        // Metadata only: `/crashes/{id}` would also carry the report, input
+        // and program blobs, up to 100 MB each, for four displayed fields.
+        let mut url = Url::parse("http://127.0.0.1:3000/crashes/metadata").map_err(|_| ())?;
+        url.query_pairs_mut().append_pair(
             "after",
             &last_crashes_date
                 .unwrap()
@@ -193,51 +195,24 @@ impl App {
                 .to_string(),
         );
 
-        info!("url: {}", ids_url.as_str());
-        let ids_response = client.get(ids_url.as_str()).send().map_err(|_| ())?;
-        if !ids_response.status().is_success() {
+        info!("url: {}", url.as_str());
+        let response = client.get(url.as_str()).send().map_err(|_| ())?;
+        if !response.status().is_success() {
+            error!("Failed to fetch new crashes: HTTP {}", response.status());
             return Ok((Vec::new(), last_crashes_date));
         }
 
-        let crash_ids: Vec<serde_json::Value> = ids_response.json().map_err(|_| ())?;
-        if crash_ids.is_empty() {
-            info!("no crashes found");
-            return Ok((Vec::new(), last_crashes_date));
-        }
-
-        let mut new_crashes: Vec<CrashInfo> = Vec::new();
-        for crash_id_obj in crash_ids {
-            if let Some(id) = crash_id_obj.get("id").and_then(|v| v.as_i64()) {
-                let crash_url = format!("http://127.0.0.1:3000/crashes/{id}");
-                match client.get(&crash_url).send() {
-                    Ok(crash_response) => {
-                        if crash_response.status().is_success() {
-                            match crash_response.json::<serde_json::Value>() {
-                                Ok(crash_json) => {
-                                    if let Some(crash_info) = Self::parse_crash_json(&crash_json) {
-                                        new_crashes.push(crash_info);
-                                    } else {
-                                        error!("Failed to parse crash {id} from JSON");
-                                    }
-                                }
-                                Err(e) => {
-                                    error!("Failed to parse response as JSON for crash {id}: {e}");
-                                }
-                            }
-                        } else {
-                            error!(
-                                "Failed to fetch crash {}: HTTP {}",
-                                id,
-                                crash_response.status()
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to fetch crash {id}: {e}");
-                    }
+        let crashes_json: Vec<serde_json::Value> = response.json().map_err(|_| ())?;
+        let mut new_crashes: Vec<CrashInfo> = crashes_json
+            .iter()
+            .filter_map(|crash| {
+                let parsed = Self::parse_crash_json(crash);
+                if parsed.is_none() {
+                    error!("Failed to parse crash from JSON: {crash}");
                 }
-            }
-        }
+                parsed
+            })
+            .collect();
 
         if !new_crashes.is_empty() {
             new_crashes.sort_by_key(|c| std::cmp::Reverse(c.created_at));

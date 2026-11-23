@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use std::{fs, io};
 
@@ -112,6 +112,19 @@ fn snapshot_interval_from(minutes: Option<u64>) -> Option<Duration> {
     }
 }
 
+/// When the next periodic snapshot is due, `None` meaning never: an interval
+/// too large to add to an `Instant` is as good as disabled.
+fn snapshot_due_at(
+    started_at: Instant,
+    last_snapshot_at: Option<Instant>,
+    interval: Duration,
+) -> Option<Instant> {
+    match last_snapshot_at {
+        None => started_at.checked_add(FIRST_SNAPSHOT_DELAY.min(interval)),
+        Some(prev) => prev.checked_add(interval),
+    }
+}
+
 /// A scheduler that manages the lifecycle of fuzzing tasks.
 pub struct Scheduler<C: TargetsCollector> {
     pub(crate) collector: C,
@@ -133,6 +146,10 @@ pub struct Scheduler<C: TargetsCollector> {
     pub(crate) started_at: Instant,
     pub(crate) last_snapshot_at: Option<Instant>,
     pub(crate) snapshot_running: Arc<AtomicBool>,
+    /// Held by interactive coverage queries. They merge into fixed profile
+    /// paths, and a query abandoned in the TUI keeps running, so two of them
+    /// would otherwise write the same `.profdata` at once.
+    pub(crate) coverage_query_lock: Mutex<()>,
 }
 
 impl<C: TargetsCollector> Scheduler<C> {
@@ -181,7 +198,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             fuzzers: Vec::new(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&empty_state) {
-            if let Err(e) = fs::write(&state_file_path, json) {
+            if let Err(e) = state::write_private_file(&state_file_path, &json) {
                 info!(
                     "Failed to create state file {}: {}",
                     state_file_path.display(),
@@ -212,6 +229,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             started_at: Instant::now(),
             last_snapshot_at: None,
             snapshot_running: Arc::new(AtomicBool::new(false)),
+            coverage_query_lock: Mutex::new(()),
         }
     }
 }

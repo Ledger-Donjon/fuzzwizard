@@ -32,6 +32,38 @@ const FORBIDDEN_SOURCE_MOUNTS: &[&str] = &[
     "/sys", "/var",
 ];
 
+/// Directory names that hold credentials or user configuration. A coverage
+/// mapping naming a file in one of them is no reason to expose it.
+const SENSITIVE_DIR_NAMES: &[&str] = &[
+    ".aws",
+    ".azure",
+    ".config",
+    ".docker",
+    ".fuzzwizard",
+    ".gnupg",
+    ".kube",
+    ".local",
+    ".password-store",
+    ".ssh",
+];
+
+/// Prefixes of toolchain and system headers (`/usr/include/...`). Nearly every
+/// coverage mapping references some, so finding them on the host says nothing
+/// about where the project sources are.
+const SYSTEM_SOURCE_PREFIXES: &[&str] = &["/usr", "/nix/store"];
+
+/// Exceptions to [`SYSTEM_SOURCE_PREFIXES`]: projects do live there.
+const PROJECT_SOURCE_PREFIXES: &[&str] = &["/usr/src", "/usr/local/src"];
+
+fn is_system_source(path: &Path) -> bool {
+    SYSTEM_SOURCE_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+        && !PROJECT_SOURCE_PREFIXES
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+}
+
 /// Whether `dir` is specific enough to be exposed to a coverage container.
 ///
 /// This is a path-string check only (no filesystem access). Call
@@ -44,6 +76,9 @@ pub(super) fn is_safe_source_mount(dir: &Path) -> bool {
     if dir.components().count() <= MIN_SOURCE_MOUNT_DEPTH {
         return false;
     }
+    if is_home_root(dir) || has_sensitive_component(dir) {
+        return false;
+    }
     // `/var` is otherwise forbidden, but `/var/tmp` is a normal staging area
     // (and `canonicalize` of `/tmp` lands here on some distros).
     if dir.starts_with("/var/tmp") {
@@ -52,6 +87,21 @@ pub(super) fn is_safe_source_mount(dir: &Path) -> bool {
     !FORBIDDEN_SOURCE_MOUNTS
         .iter()
         .any(|forbidden| dir.starts_with(forbidden))
+}
+
+/// A home directory holds the user's credentials next to their projects:
+/// `/home/<user>/proj` may be mounted, `/home/<user>` may not.
+fn is_home_root(dir: &Path) -> bool {
+    let under_home = dir.starts_with("/home") && dir.components().count() == 3;
+    under_home || std::env::var_os("HOME").is_some_and(|home| dir == Path::new(&home))
+}
+
+fn has_sensitive_component(dir: &Path) -> bool {
+    dir.components().any(|c| {
+        c.as_os_str()
+            .to_str()
+            .is_some_and(|name| SENSITIVE_DIR_NAMES.contains(&name))
+    })
 }
 
 /// Canonicalize `dir` and re-apply [`is_safe_source_mount`] on the resolved
@@ -85,10 +135,12 @@ pub(super) fn dedup_ancestors(mut dirs: Vec<PathBuf>) -> Vec<PathBuf> {
 
 /// Locate on the host the sources referenced by the coverage mapping.
 ///
-/// Two situations are handled. Either the sources sit at exactly the path
-/// recorded in the binary — no `-path-equivalence` is needed, but a bind-mount
-/// still is for container runs — or the tree was moved, in which case we walk
-/// up from each entry of `binary_paths` to derive a recorded→host mapping.
+/// Two situations are handled. Either the project sources sit at exactly the
+/// path recorded in the binary — no `-path-equivalence` is needed, but a
+/// bind-mount still is for container runs — or the tree was moved, in which
+/// case we walk up from each entry of `binary_paths` to derive a
+/// recorded→host mapping. System headers are only ever mounted alongside, and
+/// never decide between the two.
 ///
 /// Only directories accepted by [`resolve_safe_source_mount`] are ever returned.
 pub(super) fn locate_sources(
@@ -99,22 +151,27 @@ pub(super) fn locate_sources(
         return None;
     }
 
-    let present: Vec<PathBuf> = embedded_paths
+    let (system, project): (Vec<String>, Vec<String>) = embedded_paths
         .iter()
-        .map(Path::new)
-        .filter(|p| p.is_file())
-        .filter_map(|p| p.parent().map(Path::to_path_buf))
-        .filter_map(|dir| resolve_safe_source_mount(&dir))
-        .collect();
-    if !present.is_empty() {
-        let mut mounts = dedup_ancestors(present);
+        .cloned()
+        .partition(|p| is_system_source(Path::new(p)));
+
+    let present_project = present_source_dirs(&project);
+    if !present_project.is_empty() || project.is_empty() {
+        // Project directories first, so that a long list of headers cannot
+        // push them out of the mount limit.
+        let mut mounts = dedup_ancestors(present_project);
+        mounts.extend(dedup_ancestors(present_source_dirs(&system)));
         mounts.truncate(MAX_SOURCE_MOUNTS);
+        if mounts.is_empty() {
+            return None;
+        }
         info!("Sources found at their recorded paths, mounting {mounts:?}");
         return Some(SourceLocation { flag: None, mounts });
     }
 
     for binary_path in binary_paths {
-        if let Some(loc) = locate_moved_sources(embedded_paths, binary_path) {
+        if let Some(loc) = locate_moved_sources(&project, binary_path) {
             return Some(loc);
         }
     }
@@ -124,6 +181,17 @@ pub(super) fn locate_sources(
         embedded_paths.len()
     );
     None
+}
+
+/// Mountable host directories of the recorded sources that exist on the host.
+fn present_source_dirs(paths: &[String]) -> Vec<PathBuf> {
+    paths
+        .iter()
+        .map(Path::new)
+        .filter(|p| p.is_file())
+        .filter_map(|p| p.parent())
+        .filter_map(resolve_safe_source_mount)
+        .collect()
 }
 
 /// Walk up from `binary_path` looking for a directory holding a file named

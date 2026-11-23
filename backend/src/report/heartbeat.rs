@@ -57,13 +57,14 @@ pub async fn report_fuzzer_status(
 
     conn.transaction::<_, diesel::result::Error, _>(|conn| {
         for f in &payload.fuzzers {
+            let started_at = f.started_at(now);
             diesel::insert_into(fuzzer_status::table)
                 .values((
                     fuzzer_status::scheduler_name.eq(&payload.scheduler_name),
                     fuzzer_status::fuzzer_sha.eq(&f.sha),
                     fuzzer_status::fuzzer_path.eq(&f.path),
                     fuzzer_status::status.eq(&f.status),
-                    fuzzer_status::started_at.eq(f.started_at),
+                    fuzzer_status::started_at.eq(started_at),
                     fuzzer_status::last_seen_at.eq(now),
                 ))
                 .on_conflict((fuzzer_status::scheduler_name, fuzzer_status::fuzzer_sha))
@@ -71,7 +72,7 @@ pub async fn report_fuzzer_status(
                 .set((
                     fuzzer_status::fuzzer_path.eq(&f.path),
                     fuzzer_status::status.eq(&f.status),
-                    fuzzer_status::started_at.eq(f.started_at),
+                    fuzzer_status::started_at.eq(started_at),
                     fuzzer_status::last_seen_at.eq(now),
                 ))
                 .execute(conn)?;

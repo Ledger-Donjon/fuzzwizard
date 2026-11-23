@@ -98,7 +98,13 @@ fn main() {
         if let Some(BuildOutcome::Failure(msg)) = builder.poll() {
             error!("{msg}");
         }
-        let _ = scheduler.update(&logdir);
+        // While the script runs, the targets directory may be empty or hold
+        // half-copied binaries: scanning it would stop or break every fuzzer.
+        if !builder.is_building() {
+            if let Err(e) = scheduler.update(&logdir) {
+                error!("Failed to update targets: {e}");
+            }
+        }
         std::thread::sleep(std::time::Duration::from_secs(60));
         scheduler.report_crashes().unwrap();
         scheduler.log_running_tasks();

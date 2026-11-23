@@ -372,15 +372,8 @@ pub(crate) async fn get_crash_ids(
         .select((crashes::id, crashes::created_at))
         .into_boxed();
 
-    if let Some(after) = params.get("after") {
-        match chrono::NaiveDateTime::parse_from_str(after, "%Y-%m-%d %H:%M:%S%.f") {
-            Ok(after_date) => {
-                query = query.filter(crashes::created_at.gt(after_date));
-            }
-            Err(_) => {
-                return Err(StatusCode::BAD_REQUEST);
-            }
-        }
+    if let Some(after_date) = parse_after(&params)? {
+        query = query.filter(crashes::created_at.gt(after_date));
     }
 
     let crash_ids = query
@@ -395,6 +388,47 @@ pub(crate) async fn get_crash_ids(
         .collect();
 
     Ok(Json(crash_ids))
+}
+
+/// Crashes created after `after`, oldest first, without their blobs: what a
+/// client refreshing a crash list needs, in one request. At most
+/// [`MAX_CRASH_LIMIT`] are returned; the caller resumes from the last one.
+pub(crate) async fn get_crash_metadata_after(
+    State(pool): State<DbPool>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<CrashMetadata>>, StatusCode> {
+    let mut conn = pool.get().map_err(|e| {
+        error!("Failed to get DB connection from pool: {e}");
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
+
+    let mut query = crashes::table
+        .select(CrashMetadata::as_select())
+        .into_boxed();
+    if let Some(after_date) = parse_after(&params)? {
+        query = query.filter(crashes::created_at.gt(after_date));
+    }
+
+    let crashes = query
+        .order(crashes::created_at.asc())
+        .limit(MAX_CRASH_LIMIT)
+        .get_results::<CrashMetadata>(&mut conn)
+        .map_err(|e| {
+            error!("Database query failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(crashes))
+}
+
+fn parse_after(params: &HashMap<String, String>) -> Result<Option<NaiveDateTime>, StatusCode> {
+    params
+        .get("after")
+        .map(|after| {
+            NaiveDateTime::parse_from_str(after, "%Y-%m-%d %H:%M:%S%.f")
+                .map_err(|_| StatusCode::BAD_REQUEST)
+        })
+        .transpose()
 }
 
 #[cfg(test)]
