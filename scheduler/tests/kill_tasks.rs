@@ -39,6 +39,7 @@ fn test_kill_tasks_empty() {
         has_coverage: false,
         llvm_bin_directory: None,
         state_file: None,
+        coverage_snapshot_interval_minutes: None,
     };
 
     let mut scheduler = Scheduler::new(collector, config, None);
@@ -78,6 +79,7 @@ fn test_kill_tasks_with_running_tasks() {
         has_coverage: false,
         llvm_bin_directory: None,
         state_file: None,
+        coverage_snapshot_interval_minutes: None,
     };
 
     let mut scheduler = Scheduler::new(collector, config, None);
@@ -126,6 +128,7 @@ fn test_kill_tasks_with_container() {
         has_coverage: false,
         llvm_bin_directory: None,
         state_file: None,
+        coverage_snapshot_interval_minutes: None,
     };
 
     // Note: This will fail if container_binary is None, but we test the kill logic

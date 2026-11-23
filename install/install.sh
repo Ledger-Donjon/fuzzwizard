@@ -267,6 +267,7 @@ cat > "$CONFIG_JSON" << EOF
 }
 EOF
 
+chmod 600 "$CONFIG_JSON"
 echo "  - $CONFIG_JSON"
 
 # Fuzzer update script via GitHub App (artifacts), using curl
@@ -429,7 +430,8 @@ echo "Fuzzers updated in $TARGETS_DIR — run $RUN_ID"
 ENDOFUPDATESCRIPT
 } > "$UPDATE_SCRIPT"
 
-chmod +x "$UPDATE_SCRIPT"
+# 700 and not +x: the script embeds the GitHub App settings
+chmod 700 "$UPDATE_SCRIPT"
 echo "  - $UPDATE_SCRIPT"
 
 # Optionally add to main config (for FuzzTUI)
@@ -438,9 +440,13 @@ ADDED_TO_CONFIG=false
 if [[ "$ADD_TO_MAIN_CONFIG" =~ ^[oOyY] ]] && [ -f "$MAIN_CONFIG" ]; then
     SCHEDULER_CONFIG_ABS="$CONFIG_JSON"
     if command -v jq >/dev/null 2>&1; then
+        # The temporary file is created with the current umask, so the
+        # permissions of the main config -- which holds the database
+        # credentials and the Slack token -- are restored after the swap.
         if jq --arg name "$SAFE_NAME" --arg config "$SCHEDULER_CONFIG_ABS" \
             '.schedulers += [{ "name": $name, "config": $config }]' \
             "$MAIN_CONFIG" > "${MAIN_CONFIG}.tmp" && mv "${MAIN_CONFIG}.tmp" "$MAIN_CONFIG"; then
+            chmod 600 "$MAIN_CONFIG"
             echo "  - Scheduler added to $MAIN_CONFIG"
             ADDED_TO_CONFIG=true
         fi
