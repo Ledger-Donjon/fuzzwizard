@@ -65,6 +65,7 @@ fn sample_report() -> ReportResponse {
                     status: "running".to_string(),
                     started_at: Some(ts("2026-08-06 12:59:48")),
                     uptime_seconds: Some(10_800),
+                    total_runtime_seconds: Some(90_000),
                     last_seen_at: ts("2026-08-06 15:59:48"),
                     seconds_since_last_update: 12,
                 },
@@ -75,6 +76,7 @@ fn sample_report() -> ReportResponse {
                     status: "crashed".to_string(),
                     started_at: Some(ts("2026-08-06 14:00:00")),
                     uptime_seconds: None,
+                    total_runtime_seconds: None,
                     last_seen_at: ts("2026-08-06 15:59:48"),
                     seconds_since_last_update: 12,
                 },
@@ -205,6 +207,60 @@ fn heartbeat_start_time_comes_from_the_uptime() {
         legacy.fuzzers[0].started_at(ts("2026-08-06 13:00:00")),
         Some(ts("2026-08-06 12:59:48"))
     );
+}
+
+#[test]
+fn heartbeat_reads_the_runtime_counter_when_present() {
+    let payload: FuzzerStatusHeartbeat = serde_json::from_str(
+        r#"{"scheduler_name":"s","scheduler_instance":"01ab","fuzzers":[{"sha":"ab","path":"/t/f","status":"running","uptime_seconds":60,"runtime_seconds":7200}]}"#,
+    )
+    .unwrap();
+    assert_eq!(payload.scheduler_instance.as_deref(), Some("01ab"));
+    assert_eq!(payload.fuzzers[0].runtime_seconds, Some(7200));
+
+    let legacy: FuzzerStatusHeartbeat = serde_json::from_str(
+        r#"{"scheduler_name":"s","fuzzers":[{"sha":"ab","path":"/t/f","status":"running","uptime_seconds":60}]}"#,
+    )
+    .unwrap();
+    assert_eq!(legacy.scheduler_instance, None);
+    assert_eq!(legacy.fuzzers[0].runtime_seconds, None);
+}
+
+fn runtime_row(instance: &str, last: i64) -> RuntimeRow {
+    RuntimeRow {
+        scheduler_instance: instance.to_string(),
+        last_reported_seconds: last,
+    }
+}
+
+#[test]
+fn the_first_runtime_report_counts_whole() {
+    assert_eq!(runtime_delta(None, "a", 300), 300);
+}
+
+#[test]
+fn a_growing_counter_adds_its_growth() {
+    assert_eq!(runtime_delta(Some(&runtime_row("a", 300)), "a", 360), 60);
+    assert_eq!(runtime_delta(Some(&runtime_row("a", 300)), "a", 300), 0);
+}
+
+/// A restarted scheduler counts from zero: what it reports is all new time.
+#[test]
+fn a_new_scheduler_instance_counts_whole() {
+    assert_eq!(runtime_delta(Some(&runtime_row("a", 300)), "b", 500), 500);
+    assert_eq!(runtime_delta(Some(&runtime_row("a", 300)), "b", 40), 40);
+}
+
+#[test]
+fn a_counter_that_went_backwards_counts_whole() {
+    assert_eq!(runtime_delta(Some(&runtime_row("a", 300)), "a", 40), 40);
+}
+
+#[test]
+fn the_report_shows_the_total_runtime() {
+    let html = render_report_html(&sample_report());
+    assert!(html.contains("<th>Temps total</th>"));
+    assert!(html.contains(&format_duration(90_000)));
 }
 
 #[test]

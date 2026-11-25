@@ -82,6 +82,15 @@ fn test_scheduler(
     container_image: Option<&str>,
     container_binary: Option<PathBuf>,
 ) -> Scheduler<DirectoryTargetsCollector> {
+    scheduler_with_targets(dir, container_image, container_binary, vec![])
+}
+
+fn scheduler_with_targets(
+    dir: &assert_fs::TempDir,
+    container_image: Option<&str>,
+    container_binary: Option<PathBuf>,
+    targets_directories: Vec<PathBuf>,
+) -> Scheduler<DirectoryTargetsCollector> {
     let path = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
     let config = SchedulerConfig {
         scheduler_name: "unit".to_string(),
@@ -100,7 +109,7 @@ fn test_scheduler(
         coverage_snapshot_interval_minutes: None,
     };
     Scheduler::new(
-        DirectoryTargetsCollector::new(vec![]),
+        DirectoryTargetsCollector::new(targets_directories),
         config,
         container_binary,
     )
@@ -244,4 +253,41 @@ fn the_next_snapshot_is_one_interval_after_the_last() {
         snapshot_due_at(start, Some(last), interval),
         Some(last + interval)
     );
+}
+
+/// Stop the tasks of this scheduler only: `kill_tasks` would also kill the
+/// processes of the other tests, which share the scheduler name.
+fn stop_tasks(scheduler: &mut Scheduler<DirectoryTargetsCollector>) {
+    let shas: Vec<_> = scheduler.tasks.keys().copied().collect();
+    for sha in shas {
+        let mut task = scheduler.tasks.remove(&sha).unwrap();
+        scheduler.kill_task(&mut task);
+        let _ = task.child.wait();
+    }
+}
+
+#[test]
+fn the_runtime_of_a_binary_spans_its_restarts() {
+    let dir = assert_fs::TempDir::new().unwrap();
+    let targets = dir.child("targets");
+    targets.create_dir_all().unwrap();
+    let logs = dir.child("logs");
+    logs.create_dir_all().unwrap();
+    let binary = targets.child("fuzzer");
+    binary.write_str("#!/bin/sh\nexec sleep 300\n").unwrap();
+    fs::set_permissions(binary.path(), fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut scheduler =
+        scheduler_with_targets(&dir, None, None, vec![targets.path().to_path_buf()]);
+    scheduler.update(logs.path().to_str().unwrap()).unwrap();
+    let sha = *scheduler.tasks.keys().next().unwrap();
+
+    std::thread::sleep(Duration::from_millis(600));
+    scheduler.restart_task_by_sha(sha).unwrap();
+    let first_run = scheduler.finished_runtime[&sha];
+    assert!(first_run >= Duration::from_millis(600));
+
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(scheduler.runtime_of(&sha) >= first_run + Duration::from_millis(300));
+    stop_tasks(&mut scheduler);
 }

@@ -77,6 +77,10 @@ Each fuzzer has its own corpus directory: `{corpus_directory}/{sha_hex}/`
 - Corpus is reused when binary restarts
 - Initialization file created if corpus is empty
 
+### Runtime Tracking
+
+The scheduler counts the time that each fuzzer binary runs, over all its runs. It sends the counter to the backend in each status report. The backend keeps the total for each binary hash. See [backend.md](backend.md).
+
 ### Crash Detection
 
 Monitors `{crashes_directory}/` for new crash files:

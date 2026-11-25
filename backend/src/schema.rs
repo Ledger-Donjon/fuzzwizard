@@ -69,6 +69,18 @@ diesel::table! {
 }
 
 diesel::table! {
+    fuzzer_runtime (id) {
+        id -> Int4,
+        scheduler_name -> Text,
+        fuzzer_sha -> Text,
+        total_runtime_seconds -> Int8,
+        last_reported_seconds -> Int8,
+        scheduler_instance -> Text,
+        updated_at -> Timestamp,
+    }
+}
+
+diesel::table! {
     fuzzer_status (id) {
         id -> Int4,
         scheduler_name -> Text,
@@ -91,5 +103,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     coverage_paths,
     coverage_snapshots,
     crashes,
+    fuzzer_runtime,
     fuzzer_status,
 );

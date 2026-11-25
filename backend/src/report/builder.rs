@@ -19,7 +19,8 @@ use diesel::prelude::*;
 use log::error;
 
 use crate::schema::{
-    coverage_files, coverage_metrics, coverage_paths, coverage_snapshots, crashes, fuzzer_status,
+    coverage_files, coverage_metrics, coverage_paths, coverage_snapshots, crashes, fuzzer_runtime,
+    fuzzer_status,
 };
 use crate::DbPool;
 
@@ -274,6 +275,21 @@ pub(super) fn build_report(
         names.retain(|n| n == filter);
     }
 
+    let runtimes: HashMap<(String, String), i64> = fuzzer_runtime::table
+        .filter(
+            fuzzer_runtime::fuzzer_sha
+                .eq_any(fuzzer_status::table.select(fuzzer_status::fuzzer_sha)),
+        )
+        .select((
+            fuzzer_runtime::scheduler_name,
+            fuzzer_runtime::fuzzer_sha,
+            fuzzer_runtime::total_runtime_seconds,
+        ))
+        .load::<(String, String, i64)>(conn)?
+        .into_iter()
+        .map(|(scheduler, sha, total)| ((scheduler, sha), total))
+        .collect();
+
     let mut status_rows: HashMap<String, Vec<FuzzerStatusRow>> = HashMap::new();
     for row in fuzzer_status::table
         .select(FuzzerStatusRow::as_select())
@@ -332,7 +348,11 @@ pub(super) fn build_report(
                 _ => None,
             };
 
+            let total_runtime_seconds = runtimes
+                .get(&(row.scheduler_name.clone(), row.fuzzer_sha.clone()))
+                .copied();
             fuzzer_details.push(FuzzerReport {
+                total_runtime_seconds,
                 sha: row.fuzzer_sha,
                 name: display_name,
                 path: row.fuzzer_path,

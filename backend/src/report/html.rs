@@ -465,19 +465,24 @@ pub(super) fn render_report_html(report: &ReportResponse) -> String {
         } else {
             out.push_str(
                 "  <table>\n    <thead><tr><th>Fuzzer</th><th>Statut</th><th>Uptime</th>\
-                 <th>Dernier update</th><th>SHA</th></tr></thead>\n    <tbody>\n",
+                 <th>Temps total</th><th>Dernier update</th><th>SHA</th></tr></thead>\n    <tbody>\n",
             );
             for f in &s.fuzzer_details {
                 out.push_str(&format!(
                     "      <tr><td><strong>{name}</strong><span class=\"path\">{path}</span></td>\
                      <td><span class=\"pill pill-{status}\">{status}</span></td>\
-                     <td class=\"num\">{uptime}</td><td class=\"num\">{age}</td>\
+                     <td class=\"num\">{uptime}</td><td class=\"num\">{total}</td>\
+                     <td class=\"num\">{age}</td>\
                      <td class=\"mono muted\">{sha}</td></tr>\n",
                     name = html_escape(&f.name),
                     path = html_escape(&f.path),
                     status = html_escape(&f.status),
                     uptime = f
                         .uptime_seconds
+                        .map(format_duration)
+                        .unwrap_or_else(|| "-".to_string()),
+                    total = f
+                        .total_runtime_seconds
                         .map(format_duration)
                         .unwrap_or_else(|| "-".to_string()),
                     age = format_duration(f.seconds_since_last_update),

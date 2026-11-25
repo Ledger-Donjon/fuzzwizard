@@ -5,16 +5,22 @@ use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{coverage_metrics, coverage_snapshots, fuzzer_status};
+use crate::schema::{coverage_metrics, coverage_snapshots, fuzzer_runtime, fuzzer_status};
 
 // --- Fuzzer heartbeat types ---
 
 pub(crate) const VALID_FUZZER_STATUSES: [&str; 3] = ["running", "crashed", "stopped"];
 pub(crate) const MAX_FUZZERS_PER_HEARTBEAT: usize = 512;
 
+pub(crate) const MAX_SCHEDULER_INSTANCE_LEN: usize = 64;
+
 #[derive(Deserialize, Serialize)]
 pub struct FuzzerStatusHeartbeat {
     pub scheduler_name: String,
+    /// Random per scheduler process. Only sent by schedulers that report a
+    /// `runtime_seconds` counter.
+    #[serde(default)]
+    pub scheduler_instance: Option<String>,
     pub fuzzers: Vec<FuzzerStatusInput>,
 }
 
@@ -29,6 +35,34 @@ pub(crate) struct FuzzerStatusInput {
     pub started_at: Option<NaiveDateTime>,
     #[serde(default)]
     pub uptime_seconds: Option<u64>,
+    /// Running time of the binary over all its runs since the scheduler
+    /// process started. It never decreases within one `scheduler_instance`.
+    #[serde(default)]
+    pub runtime_seconds: Option<u64>,
+}
+
+/// Runtime counter last recorded for a binary.
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = fuzzer_runtime)]
+pub(crate) struct RuntimeRow {
+    pub scheduler_instance: String,
+    pub last_reported_seconds: i64,
+}
+
+/// Seconds to add to the total runtime of a binary, given the counter last
+/// recorded for it and the counter the scheduler `instance` reports now.
+///
+/// A new instance, or a counter that went backwards, means that the scheduler
+/// restarted and counts from zero again: the whole counter is new time.
+pub(crate) fn runtime_delta(previous: Option<&RuntimeRow>, instance: &str, reported: i64) -> i64 {
+    match previous {
+        Some(prev)
+            if prev.scheduler_instance == instance && reported >= prev.last_reported_seconds =>
+        {
+            reported - prev.last_reported_seconds
+        }
+        _ => reported,
+    }
 }
 
 impl FuzzerStatusInput {
@@ -113,6 +147,9 @@ pub(crate) struct FuzzerReport {
     pub status: String,
     pub started_at: Option<NaiveDateTime>,
     pub uptime_seconds: Option<i64>,
+    /// Running time of the binary over all its runs, `None` if no scheduler
+    /// reported it.
+    pub total_runtime_seconds: Option<i64>,
     pub last_seen_at: NaiveDateTime,
     pub seconds_since_last_update: i64,
 }

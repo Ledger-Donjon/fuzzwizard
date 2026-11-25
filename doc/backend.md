@@ -11,6 +11,7 @@ The backend is a REST API that manages crash storage and retrieval in a PostgreS
 - Managing administrative events
 - Storing coverage snapshots (aggregated metrics per build fingerprint)
 - Tracking live fuzzer status through scheduler heartbeats
+- Tracking the total runtime of each fuzzer binary
 - Reporting (aggregated status, coverage and crash counts, as JSON or HTML)
 - Maintenance (preview and delete old records)
 
@@ -144,18 +145,33 @@ The payload declares the **complete** set of fuzzers known to the scheduler. Row
 ```json
 {
   "scheduler_name": "my-scheduler",
+  "scheduler_instance": "9f2c41d07a6b3e58",
   "fuzzers": [
     {
       "sha": "abcdef1234...",
       "path": "/targets/fuzz_parser",
       "status": "running",
-      "started_at": "2026-08-06T12:59:48"
+      "uptime_seconds": 3600,
+      "runtime_seconds": 86400
     }
   ]
 }
 ```
 
 Accepted statuses are `running`, `crashed` and `stopped`. The endpoint returns `204 No Content`, and a heartbeat failure never interrupts fuzzing: the scheduler only logs it at debug level.
+
+### Total Runtime
+
+The total runtime is the time during which a fuzzer binary ran, over all its runs. The backend keeps one total for each binary, identified by its hash. The total stays correct when the fuzzer restarts and when the scheduler restarts.
+
+The scheduler sends two fields for the total runtime:
+
+- `scheduler_instance` is a random value that the scheduler process sets when it starts. A new value tells the backend that the scheduler restarted.
+- `runtime_seconds` is the time that the binary ran since the scheduler process started. The counter adds up all runs of the binary. Time in the `crashed` or `stopped` status does not count. A fuzzer with `-jobs=4` counts once, because the counter measures wall-clock time and not CPU time.
+
+The backend stores the total in the `fuzzer_runtime` table. For each heartbeat, it adds the growth of the counter since the previous heartbeat. If `scheduler_instance` changed, or if the counter is smaller than before, the scheduler restarted. The backend then adds the full counter. Thus a scheduler restart loses at most the last heartbeat interval (60 seconds).
+
+If a heartbeat has no `scheduler_instance`, the backend does not change the total. Schedulers that are older than this field send no total.
 
 
 ## Reporting
@@ -236,6 +252,8 @@ xdg-open http://127.0.0.1:3000/report/html
 ```
 
 The `fuzzer_status` table needs no cleanup: it holds at most one row per live fuzzer and is pruned by each heartbeat.
+
+The `fuzzer_runtime` table keeps one row for each fuzzer binary that a scheduler reported, also after the binary is gone. A heartbeat does not delete these rows, and the maintenance tool does not delete them either. Each row is small, and the report shows the total of each binary in the "Temps total" column of the fuzzer table and in the `total_runtime_seconds` field of the JSON report.
 
 
 ## Maintenance / Cleanup
