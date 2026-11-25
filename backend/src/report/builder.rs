@@ -19,8 +19,8 @@ use diesel::prelude::*;
 use log::error;
 
 use crate::schema::{
-    coverage_files, coverage_metrics, coverage_paths, coverage_snapshots, crashes, fuzzer_runtime,
-    fuzzer_status,
+    coverage_files, coverage_metrics, coverage_paths, coverage_snapshots, crashes,
+    fuzzer_coverage_points, fuzzer_runtime, fuzzer_status,
 };
 use crate::DbPool;
 
@@ -83,10 +83,89 @@ pub(super) fn tail(
     points
 }
 
+/// Current value, change since the point before, and peak of a series, oldest
+/// point first. `None` for an empty series.
+pub(super) fn metric_report(
+    metric_name: String,
+    history: Vec<CoverageHistoryPoint>,
+) -> Option<CoverageMetricReport> {
+    let current = history.last()?;
+    let (covered, total, current_percent) = (current.covered, current.total, current.percent);
+    let previous = history
+        .len()
+        .checked_sub(2)
+        .map(|i| (history[i].covered, history[i].percent));
+    let peak = history
+        .iter()
+        .max_by(|a, b| a.percent.total_cmp(&b.percent))
+        .unwrap_or(current);
+    let (peak_percent, peak_captured_at) = (peak.percent, peak.captured_at);
+    Some(CoverageMetricReport {
+        metric_name,
+        covered,
+        total,
+        percent: current_percent,
+        previous_covered: previous.map(|(c, _)| c),
+        previous_percent: previous.map(|(_, p)| p),
+        delta_covered: previous.map(|(c, _)| covered - c),
+        delta_percent: previous.map(|(_, p)| ((current_percent - p) * 100.0).round() / 100.0),
+        peak_percent,
+        peak_captured_at: Some(peak_captured_at),
+        history: tail(history, HISTORY_POINTS),
+    })
+}
+
+/// Coverage series of each fuzzer binary, by hash.
+type FuzzerCoverage = HashMap<String, Vec<CoverageMetricReport>>;
+
+/// Coverage series of each fuzzer binary over the given snapshots.
+fn build_fuzzer_coverage(
+    conn: &mut PgConnection,
+    snapshot_ids: &[i32],
+) -> Result<FuzzerCoverage, diesel::result::Error> {
+    let mut by_sha: HashMap<String, Vec<FuzzerPointRow>> = HashMap::new();
+    for row in fuzzer_coverage_points::table
+        .filter(fuzzer_coverage_points::snapshot_id.eq_any(snapshot_ids))
+        .order(fuzzer_coverage_points::captured_at.asc())
+        .select(FuzzerPointRow::as_select())
+        .load::<FuzzerPointRow>(conn)?
+    {
+        by_sha.entry(row.fuzzer_sha.clone()).or_default().push(row);
+    }
+
+    Ok(by_sha
+        .into_iter()
+        .map(|(sha, rows)| {
+            let metrics = FuzzerPointRow::METRIC_NAMES
+                .iter()
+                .enumerate()
+                .filter_map(|(i, name)| {
+                    let history = rows
+                        .iter()
+                        .filter_map(|row| {
+                            let (covered, total) = row.counts()[i];
+                            (total > 0).then(|| CoverageHistoryPoint {
+                                captured_at: row.captured_at,
+                                covered,
+                                total,
+                                percent: percent(covered.into(), total.into()),
+                                runtime_seconds: row.runtime_seconds,
+                            })
+                        })
+                        .collect();
+                    metric_report(name.to_string(), history)
+                })
+                .collect();
+            (sha, metrics)
+        })
+        .collect())
+}
+
+/// Coverage of a scheduler, and the series of each of its fuzzer binaries.
 fn build_coverage(
     conn: &mut PgConnection,
     scheduler: &str,
-) -> Result<Option<CoverageReport>, diesel::result::Error> {
+) -> Result<(Option<CoverageReport>, FuzzerCoverage), diesel::result::Error> {
     let snapshots: Vec<SnapshotRow> = coverage_snapshots::table
         .filter(coverage_snapshots::scheduler_name.eq(scheduler))
         .order(coverage_snapshots::captured_at.desc())
@@ -95,7 +174,7 @@ fn build_coverage(
         .load(conn)?;
 
     let Some(latest) = snapshots.first() else {
-        return Ok(None);
+        return Ok((None, HashMap::new()));
     };
 
     let ids: Vec<i32> = snapshots.iter().map(|s| s.id).collect();
@@ -132,43 +211,19 @@ fn build_coverage(
                     covered: m.covered,
                     total: m.total,
                     percent: percent(m.covered.into(), m.total.into()),
+                    runtime_seconds: None,
                 });
         }
     }
 
     let previous = snapshots.get(1);
-    let previous_metrics: HashMap<&str, &SnapshotMetric> = previous
-        .and_then(|p| by_snapshot.get(&p.id))
-        .into_iter()
-        .flatten()
-        .map(|m| (m.metric_name.as_str(), m))
-        .collect();
-
     let mut metrics: Vec<CoverageMetricReport> = by_snapshot
         .get(&latest.id)
         .into_iter()
         .flatten()
-        .map(|m| {
-            let current = percent(m.covered.into(), m.total.into());
-            let prev = previous_metrics.get(m.metric_name.as_str());
-            let previous_percent = prev.map(|p| percent(p.covered.into(), p.total.into()));
+        .filter_map(|m| {
             let history = series.remove(&m.metric_name).unwrap_or_default();
-            let peak = history
-                .iter()
-                .max_by(|a, b| a.percent.total_cmp(&b.percent));
-            CoverageMetricReport {
-                metric_name: m.metric_name.clone(),
-                covered: m.covered,
-                total: m.total,
-                percent: current,
-                previous_covered: prev.map(|p| p.covered),
-                previous_percent,
-                delta_covered: prev.map(|p| m.covered - p.covered),
-                delta_percent: previous_percent.map(|p| ((current - p) * 100.0).round() / 100.0),
-                peak_percent: peak.map(|p| p.percent).unwrap_or(current),
-                peak_captured_at: peak.map(|p| p.captured_at),
-                history: tail(history, HISTORY_POINTS),
-            }
+            metric_report(m.metric_name.clone(), history)
         })
         .collect();
     metrics.sort_by(|a, b| a.metric_name.cmp(&b.metric_name));
@@ -228,7 +283,9 @@ fn build_coverage(
     });
     files.truncate(REPORTED_FILES);
 
-    Ok(Some(CoverageReport {
+    let fuzzers = build_fuzzer_coverage(conn, &ids)?;
+
+    let report = CoverageReport {
         captured_at: latest.captured_at,
         fuzzer_engine: latest.fuzzer_engine.clone(),
         build_fingerprint: latest.build_fingerprint.clone(),
@@ -242,7 +299,8 @@ fn build_coverage(
         metrics,
         files_total,
         files,
-    }))
+    };
+    Ok((Some(report), fuzzers))
 }
 
 pub(super) fn build_report(
@@ -320,6 +378,7 @@ pub(super) fn build_report(
 
     for name in names {
         let rows = status_rows.remove(&name).unwrap_or_default();
+        let (coverage, mut fuzzer_coverage) = build_coverage(conn, &name)?;
 
         let mut counts = FuzzerCounts::default();
         let mut fuzzer_details = Vec::with_capacity(rows.len());
@@ -353,6 +412,7 @@ pub(super) fn build_report(
                 .copied();
             fuzzer_details.push(FuzzerReport {
                 total_runtime_seconds,
+                coverage: fuzzer_coverage.remove(&row.fuzzer_sha).unwrap_or_default(),
                 sha: row.fuzzer_sha,
                 name: display_name,
                 path: row.fuzzer_path,
@@ -371,7 +431,6 @@ pub(super) fn build_report(
             .unwrap_or("unknown")
             .to_string();
 
-        let coverage = build_coverage(conn, &name)?;
         if let Some(cov) = &coverage {
             for m in &cov.metrics {
                 let entry = global_coverage

@@ -16,10 +16,18 @@ const FUZZER_ENGINE: &str = "libfuzzer";
 /// that the `llvm-profdata` / `llvm-cov` run can happen detached.
 pub(crate) struct SnapshotJob {
     pub request: coverage::CoverageRequest,
+    pub fuzzers: Vec<FuzzerSnapshot>,
     pub fingerprint: String,
     pub num_fuzzers: i32,
     pub scheduler_name: String,
     pub backend_url: String,
+}
+
+/// Coverage of one fuzzer binary alone.
+pub(crate) struct FuzzerSnapshot {
+    /// Hex-encoded hash of the binary, the key of its series in the backend.
+    pub sha: String,
+    pub request: coverage::CoverageRequest,
 }
 
 #[derive(Serialize)]
@@ -30,6 +38,13 @@ struct SnapshotPayload {
     num_fuzzers: i32,
     metrics: Vec<coverage::CoverageMetricEntry>,
     files: Vec<coverage::CoverageFileEntry>,
+    fuzzers: Vec<FuzzerCoveragePayload>,
+}
+
+#[derive(Serialize)]
+struct FuzzerCoveragePayload {
+    sha: String,
+    metrics: Vec<coverage::CoverageMetricEntry>,
 }
 
 impl SnapshotJob {
@@ -41,6 +56,20 @@ impl SnapshotJob {
             return;
         };
 
+        // The file list of each fuzzer is dropped: the project list already
+        // covers the files, and the payload stays small.
+        let fuzzers = self
+            .fuzzers
+            .iter()
+            .filter_map(|fuzzer| {
+                let summary = fuzzer.request.summary()?;
+                Some(FuzzerCoveragePayload {
+                    sha: fuzzer.sha.clone(),
+                    metrics: summary.metrics,
+                })
+            })
+            .collect();
+
         let payload = SnapshotPayload {
             scheduler_name: self.scheduler_name.clone(),
             fuzzer_engine: FUZZER_ENGINE,
@@ -48,6 +77,7 @@ impl SnapshotJob {
             num_fuzzers: self.num_fuzzers,
             metrics: summary.metrics,
             files: summary.files,
+            fuzzers,
         };
 
         post_to_backend(

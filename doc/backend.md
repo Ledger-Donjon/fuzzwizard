@@ -10,6 +10,7 @@ The backend is a REST API that manages crash storage and retrieval in a PostgreS
 - Retrieving crashes (all, last N, by ID)
 - Managing administrative events
 - Storing coverage snapshots (aggregated metrics per build fingerprint)
+- Storing the coverage time series of each fuzzer binary
 - Tracking live fuzzer status through scheduler heartbeats
 - Tracking the total runtime of each fuzzer binary
 - Reporting (aggregated status, coverage and crash counts, as JSON or HTML)
@@ -44,6 +45,7 @@ Listing endpoints return metadata only (`id`, `filename`, `scheduler_name`,
 - **`POST /coverage_snapshots`**: Create a coverage snapshot (deduplicated by fingerprint)
 - **`GET /coverage_snapshots?scheduler=&after=&before=&limit=`**: List snapshots (time series). `limit` defaults to 100 and is capped at 1000.
 - **`GET /coverage_snapshots/latest?scheduler=`**: Get latest snapshot for a scheduler
+- **`GET /coverage_snapshots/fuzzers?scheduler=&sha=&after=&before=&limit=`**: List the coverage points of the fuzzer binaries (time series), newest first. `limit` defaults to 100 and is capped at 1000.
 
 ### Fuzzer Status
 
@@ -129,8 +131,49 @@ Snapshots are deduplicated by `build_fingerprint` (the canonical sorted SHA3-256
     {"metric_name": "lines", "covered": 450, "total": 1000},
     {"metric_name": "functions", "covered": 30, "total": 50},
     {"metric_name": "regions", "covered": 200, "total": 500}
+  ],
+  "fuzzers": [
+    {
+      "sha": "abcdef1234...",
+      "metrics": [
+        {"metric_name": "lines", "covered": 300, "total": 800},
+        {"metric_name": "functions", "covered": 20, "total": 40}
+      ]
+    }
   ]
 }
+```
+
+### Coverage of Each Fuzzer
+
+Each snapshot also carries the coverage of each fuzzer binary alone, in the `fuzzers` array. The scheduler measures each binary with its own profile only. Thus the numbers show what one fuzzer reached, and not the merged result of all fuzzers.
+
+The backend stores one row for each binary and each snapshot in the `fuzzer_coverage_points` table. These rows form the coverage time series of the binary. A row has these fields:
+
+- `scheduler_name` and `fuzzer_sha` identify the series. `fuzzer_sha` is the hex hash of the binary, the same value as in the heartbeat. A rebuild gives a new hash, so a rebuild starts a new series.
+- `captured_at` is the time of the snapshot that carried the point. The project point and the fuzzer points of one snapshot have the same time.
+- `runtime_seconds` is the total runtime of the binary at `captured_at` (see [Total Runtime](#total-runtime)). The value is `null` if the backend has no total for the binary. The value can be late by one heartbeat interval (60 seconds).
+- `lines_*`, `functions_*`, `regions_*`, and `branches_*` are the covered and total counts. A metric that the scheduler did not send is stored as `0 / 0`.
+
+A scheduler adds a point for each binary at each snapshot: every `coverage_snapshot_interval_minutes` (see [config.md](config.md)) and at each build transition. The rule that ignores a second snapshot of the same build within five minutes also applies to the points. A snapshot without a `fuzzers` array is valid. Schedulers that are older than this field send no points.
+
+Run the migration before you deploy the backend. The backend writes the points in the snapshot transaction, so a missing table fails every snapshot.
+
+`GET /coverage_snapshots/fuzzers` returns the points. Use `sha` to get the series of one binary, and `after` and `before` (format `%Y-%m-%d %H:%M:%S`) to select a time range.
+
+```json
+[
+  {
+    "scheduler_name": "my-scheduler",
+    "fuzzer_sha": "abcdef1234...",
+    "captured_at": "2026-11-25T14:00:00",
+    "runtime_seconds": 86400,
+    "lines_covered": 300, "lines_total": 800,
+    "functions_covered": 20, "functions_total": 40,
+    "regions_covered": 0, "regions_total": 0,
+    "branches_covered": 0, "branches_total": 0
+  }
+]
 ```
 
 
@@ -207,6 +250,10 @@ Schedulers snapshot on a timer (hourly by default, see `coverage_snapshot_interv
 
 `totals.coverage` sums the latest snapshot of every scheduler per metric, giving a project-wide ratio.
 
+### Coverage of Each Fuzzer in the Report
+
+Each entry of `fuzzer_details` has a `coverage` list. The list holds one item for each metric that has a total above 0, with the same fields as the metrics of the coverage block (`covered`, `percent`, `delta_percent`, `peak_percent`, `history`). Each point of the `history` also has `runtime_seconds`. The backend builds the list from the points of the 500 most recent snapshots of the scheduler, and caps each `history` to its last 40 points. If no snapshot measured the binary, the list is empty.
+
 ### Per-File Detail
 
 `llvm-cov export` already breaks its totals down per source file, so each snapshot also stores that breakdown. `files_total` counts the instrumented files, and `files` lists the 100 with the most uncovered lines first — the ranking that points at where fuzzing has the most left to gain.
@@ -241,7 +288,7 @@ Health is derived from the age of the most recent heartbeat, relative to the exp
 
 ### HTML Report
 
-`GET /report/html` serves the same data as a self-contained page (inline CSS, no external asset) with status pills, coverage progress bars annotated with their delta, an inline SVG trend line per metric, and a per-fuzzer table. Hovering a coverage bar shows the peak ever reached. A global coverage card is added when several schedulers are reported. The weakest 15 files are tabulated under the coverage block, the rest folding into an expandable section; hovering a truncated path shows it in full. The page refreshes itself every 30 seconds.
+`GET /report/html` serves the same data as a self-contained page (inline CSS, no external asset) with status pills, coverage progress bars annotated with their delta, an inline SVG trend line per metric, and a per-fuzzer table. Hovering a coverage bar shows the peak ever reached. A global coverage card is added when several schedulers are reported. The weakest 15 files are tabulated under the coverage block, the rest folding into an expandable section; hovering a truncated path shows it in full. The "Coverage" column of the fuzzer table shows the line coverage of each binary, its change since the previous point, and a trend line. If you hover the cell, the page shows the other metrics and the date of the first point of the trend. The page refreshes itself every 30 seconds.
 
 ```bash
 # JSON, scriptable
@@ -270,6 +317,8 @@ The `fuzzwizard-cleanup` CLI tool provides interactive, safe cleanup of old back
 | Coverage per-file detail | 30 days (`--coverage-files-days`, `0` disables the purge) |
 
 Dropping the per-file detail leaves the snapshots and their aggregated metrics untouched, so long-term trends survive the purge while the bulky part is reclaimed.
+
+The coverage points of each fuzzer belong to their snapshot. When the tool deletes a snapshot (`--coverage-before`), the database also deletes its points. The per-file purge does not change the points.
 
 ### Usage
 

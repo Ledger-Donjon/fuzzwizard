@@ -5,7 +5,9 @@ use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{coverage_metrics, coverage_snapshots, fuzzer_runtime, fuzzer_status};
+use crate::schema::{
+    coverage_metrics, coverage_snapshots, fuzzer_coverage_points, fuzzer_runtime, fuzzer_status,
+};
 
 // --- Fuzzer heartbeat types ---
 
@@ -152,6 +154,8 @@ pub(crate) struct FuzzerReport {
     pub total_runtime_seconds: Option<i64>,
     pub last_seen_at: NaiveDateTime,
     pub seconds_since_last_update: i64,
+    /// Coverage series of this binary alone, empty if no snapshot measured it.
+    pub coverage: Vec<CoverageMetricReport>,
 }
 
 #[derive(Serialize)]
@@ -209,6 +213,10 @@ pub(crate) struct CoverageHistoryPoint {
     pub covered: i32,
     pub total: i32,
     pub percent: f64,
+    /// Total runtime of the binary at `captured_at`. Only set in the series of
+    /// a fuzzer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_seconds: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -238,6 +246,37 @@ pub(crate) struct SnapshotMetric {
     pub metric_name: String,
     pub covered: i32,
     pub total: i32,
+}
+
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = fuzzer_coverage_points)]
+pub(crate) struct FuzzerPointRow {
+    pub fuzzer_sha: String,
+    pub captured_at: NaiveDateTime,
+    pub runtime_seconds: Option<i64>,
+    pub lines_covered: i32,
+    pub lines_total: i32,
+    pub functions_covered: i32,
+    pub functions_total: i32,
+    pub regions_covered: i32,
+    pub regions_total: i32,
+    pub branches_covered: i32,
+    pub branches_total: i32,
+}
+
+impl FuzzerPointRow {
+    /// Names of the metric columns, in the order of [`Self::counts`].
+    pub const METRIC_NAMES: [&'static str; 4] = ["branches", "functions", "lines", "regions"];
+
+    /// `(covered, total)` of each metric column.
+    pub fn counts(&self) -> [(i32, i32); 4] {
+        [
+            (self.branches_covered, self.branches_total),
+            (self.functions_covered, self.functions_total),
+            (self.lines_covered, self.lines_total),
+            (self.regions_covered, self.regions_total),
+        ]
+    }
 }
 
 #[derive(Queryable)]

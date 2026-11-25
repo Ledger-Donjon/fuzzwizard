@@ -95,8 +95,12 @@ const FIRST_SNAPSHOT_DELAY: Duration = Duration::from_secs(300);
 /// Merged profile of an interactive project-wide coverage query.
 const PROJECT_PROFDATA: &str = "project.profdata";
 
-/// Merged profile of a background snapshot.
+/// Merged profile of a background snapshot, in the coverage directory for the
+/// project and in the directory of each task for its own measure.
 const SNAPSHOT_PROFDATA: &str = "snapshot.profdata";
+
+/// Merged profile of an interactive coverage query for one fuzzer.
+const TASK_PROFDATA: &str = "coverage.profdata";
 
 /// How long a fuzzer is given to acknowledge the `SIGUSR1` profile flush.
 const COVERAGE_FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
