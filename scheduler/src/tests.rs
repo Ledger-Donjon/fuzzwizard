@@ -324,6 +324,7 @@ fn a_snapshot_measures_each_fuzzer_alone() {
             .map(|(_, task)| task)
             .unwrap();
         let name = task.path.file_name().unwrap();
+        assert_eq!(fuzzer.name, name.to_str().unwrap());
         assert_eq!(fuzzer.request.binaries.len(), 1);
         assert_eq!(
             fuzzer.request.coverage_dir,

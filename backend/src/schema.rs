@@ -84,6 +84,7 @@ diesel::table! {
         regions_total -> Int4,
         branches_covered -> Int4,
         branches_total -> Int4,
+        fuzzer_name -> Nullable<Text>,
     }
 }
 

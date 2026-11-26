@@ -285,11 +285,13 @@ impl<C: TargetsCollector> Scheduler<C> {
         let request = self.project_coverage_request(SNAPSHOT_PROFDATA)?;
         let fuzzers = self
             .tasks
-            .keys()
+            .iter()
             .filter_map(
-                |sha| match self.task_coverage_request(sha, SNAPSHOT_PROFDATA) {
+                |(sha, task)| match self.task_coverage_request(sha, SNAPSHOT_PROFDATA) {
                     Ok(request) => Some(FuzzerSnapshot {
                         sha: hex::encode(sha),
+                        // A task without a valid file name has no request.
+                        name: fuzzer_name_of(&task.path)?.to_string(),
                         request,
                     }),
                     Err(e) => {

@@ -135,6 +135,7 @@ Snapshots are deduplicated by `build_fingerprint` (the canonical sorted SHA3-256
   "fuzzers": [
     {
       "sha": "abcdef1234...",
+      "name": "fuzz_parser",
       "metrics": [
         {"metric_name": "lines", "covered": 300, "total": 800},
         {"metric_name": "functions", "covered": 20, "total": 40}
@@ -151,6 +152,7 @@ Each snapshot also carries the coverage of each fuzzer binary alone, in the `fuz
 The backend stores one row for each binary and each snapshot in the `fuzzer_coverage_points` table. These rows form the coverage time series of the binary. A row has these fields:
 
 - `scheduler_name` and `fuzzer_sha` identify the series. `fuzzer_sha` is the hex hash of the binary, the same value as in the heartbeat. A rebuild gives a new hash, so a rebuild starts a new series.
+- `fuzzer_name` is the file name of the binary, as the scheduler sends it in the `name` field of each fuzzer. The value is stored with each point, so it stays available after the binary is gone. The value is `null` for a point that an older scheduler sent, unless the migration found the binary in `fuzzer_status`.
 - `captured_at` is the time of the snapshot that carried the point. The project point and the fuzzer points of one snapshot have the same time.
 - `runtime_seconds` is the total runtime of the binary at `captured_at` (see [Total Runtime](#total-runtime)). The value is `null` if the backend has no total for the binary. The value can be late by one heartbeat interval (60 seconds).
 - `lines_*`, `functions_*`, `regions_*`, and `branches_*` are the covered and total counts. A metric that the scheduler did not send is stored as `0 / 0`.
@@ -166,6 +168,7 @@ Run the migration before you deploy the backend. The backend writes the points i
   {
     "scheduler_name": "my-scheduler",
     "fuzzer_sha": "abcdef1234...",
+    "fuzzer_name": "fuzz_parser",
     "captured_at": "2026-11-25T14:00:00",
     "runtime_seconds": 86400,
     "lines_covered": 300, "lines_total": 800,

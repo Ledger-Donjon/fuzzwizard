@@ -27,6 +27,8 @@ pub(crate) struct SnapshotJob {
 pub(crate) struct FuzzerSnapshot {
     /// Hex-encoded hash of the binary, the key of its series in the backend.
     pub sha: String,
+    /// File name of the binary.
+    pub name: String,
     pub request: coverage::CoverageRequest,
 }
 
@@ -44,6 +46,7 @@ struct SnapshotPayload {
 #[derive(Serialize)]
 struct FuzzerCoveragePayload {
     sha: String,
+    name: String,
     metrics: Vec<coverage::CoverageMetricEntry>,
 }
 
@@ -65,6 +68,7 @@ impl SnapshotJob {
                 let summary = fuzzer.request.summary()?;
                 Some(FuzzerCoveragePayload {
                     sha: fuzzer.sha.clone(),
+                    name: fuzzer.name.clone(),
                     metrics: summary.metrics,
                 })
             })

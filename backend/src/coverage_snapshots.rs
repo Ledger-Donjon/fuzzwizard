@@ -35,6 +35,9 @@ const MAX_SNAPSHOT_LIMIT: i64 = 1000;
 /// Upper bound on the metrics of the project and of each fuzzer.
 const MAX_METRICS: usize = 20;
 
+/// Upper bound on the file name of a fuzzer binary.
+const MAX_FUZZER_NAME_LEN: usize = 256;
+
 #[derive(Deserialize, Serialize)]
 pub(crate) struct CreateCoverageSnapshot {
     scheduler_name: String,
@@ -52,6 +55,9 @@ pub(crate) struct CreateCoverageSnapshot {
 #[derive(Deserialize, Serialize, Clone)]
 struct FuzzerCoverageInput {
     sha: String,
+    /// File name of the binary. Older schedulers send none.
+    #[serde(default)]
+    name: Option<String>,
     metrics: Vec<CoverageMetricInput>,
 }
 
@@ -143,6 +149,8 @@ struct CoverageMetric {
 pub(crate) struct FuzzerCoveragePoint {
     scheduler_name: String,
     fuzzer_sha: String,
+    /// File name of the binary, `null` for a point sent by an older scheduler.
+    fuzzer_name: Option<String>,
     captured_at: NaiveDateTime,
     runtime_seconds: Option<i64>,
     lines_covered: i32,
@@ -191,6 +199,12 @@ pub(crate) async fn create_coverage_snapshot(
     for f in &payload.fuzzers {
         if f.sha.is_empty() || f.sha.len() > 128 {
             return Err((StatusCode::BAD_REQUEST, "Invalid fuzzer sha".to_string()));
+        }
+        if f.name
+            .as_ref()
+            .is_some_and(|n| n.is_empty() || n.len() > MAX_FUZZER_NAME_LEN)
+        {
+            return Err((StatusCode::BAD_REQUEST, "Invalid fuzzer name".to_string()));
         }
         validate_metrics(&f.metrics)
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("Fuzzer {}: {e}", f.sha)))?;
@@ -417,6 +431,7 @@ fn insert_fuzzer_points(
                 fuzzer_coverage_points::snapshot_id.eq(snapshot_id),
                 fuzzer_coverage_points::scheduler_name.eq(scheduler_name),
                 fuzzer_coverage_points::fuzzer_sha.eq(&f.sha),
+                fuzzer_coverage_points::fuzzer_name.eq(f.name.as_deref()),
                 fuzzer_coverage_points::captured_at.eq(captured_at),
                 fuzzer_coverage_points::runtime_seconds.eq(runtimes.get(&f.sha).copied()),
                 fuzzer_coverage_points::lines_covered.eq(lines.0),
@@ -662,10 +677,21 @@ mod tests {
     fn a_snapshot_carries_the_metrics_of_each_fuzzer() {
         let payload: CreateCoverageSnapshot = serde_json::from_str(
             r#"{"scheduler_name":"s","fuzzer_engine":"libfuzzer","build_fingerprint":"ab","num_fuzzers":1,"metrics":[],
-                "fuzzers":[{"sha":"0a1b","metrics":[{"metric_name":"lines","covered":4,"total":9}]}]}"#,
+                "fuzzers":[{"sha":"0a1b","name":"fuzz_parser","metrics":[{"metric_name":"lines","covered":4,"total":9}]}]}"#,
         )
         .unwrap();
         assert_eq!(payload.fuzzers[0].sha, "0a1b");
+        assert_eq!(payload.fuzzers[0].name.as_deref(), Some("fuzz_parser"));
         assert_eq!(point_counts(&payload.fuzzers[0].metrics)[0], (4, 9));
+    }
+
+    #[test]
+    fn a_fuzzer_without_name_stays_valid() {
+        let payload: CreateCoverageSnapshot = serde_json::from_str(
+            r#"{"scheduler_name":"s","fuzzer_engine":"libfuzzer","build_fingerprint":"ab","num_fuzzers":1,"metrics":[],
+                "fuzzers":[{"sha":"0a1b","metrics":[]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(payload.fuzzers[0].name, None);
     }
 }
