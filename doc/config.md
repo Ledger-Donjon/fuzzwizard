@@ -335,6 +335,8 @@ Minutes between two periodic coverage snapshots sent to the backend, which is wh
 
 Each snapshot re-runs `llvm-profdata merge` and `llvm-cov export` over every instrumented binary. That work happens in a background thread and never delays fuzzer supervision, but it does cost CPU: lengthen the interval on large projects, and note that a snapshot still running when the next one is due is simply skipped.
 
+Each snapshot also measures each fuzzer binary alone. This adds one point to the coverage time series of each binary, and runs one more `llvm-profdata merge` and one more `llvm-cov export` for each fuzzer. Thus this interval is also the time between two points of a fuzzer series. See [scheduler.md](scheduler.md).
+
 **Example**: `"coverage_snapshot_interval_minutes": 30` for a more reactive report.
 
 #### `llvm_bin_directory` (string, optional)

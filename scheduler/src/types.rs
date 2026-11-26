@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Child, ChildStderr};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +45,17 @@ pub struct Task {
     pub status: TaskStatus,
     pub(crate) crashed_at: Option<Instant>,
     pub(crate) stopped_at: Option<Instant>,
+}
+
+impl Task {
+    /// How long the fuzzer ran: until it crashed or was stopped, or until now.
+    pub(crate) fn run_time(&self) -> Duration {
+        let end = self
+            .crashed_at
+            .or(self.stopped_at)
+            .unwrap_or_else(Instant::now);
+        end.saturating_duration_since(self.started_at)
+    }
 }
 
 #[derive(Serialize, Clone)]

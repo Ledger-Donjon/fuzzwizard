@@ -106,6 +106,10 @@ async fn main() {
             "/coverage_snapshots/latest",
             get(coverage_snapshots::get_latest_coverage_snapshot),
         )
+        .route(
+            "/coverage_snapshots/fuzzers",
+            get(coverage_snapshots::get_fuzzer_coverage_points),
+        )
         .route("/fuzzer_status", post(report::report_fuzzer_status))
         .route("/report", get(report::get_report))
         .route("/report/html", get(report::get_report_html))

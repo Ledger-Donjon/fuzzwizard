@@ -4,14 +4,18 @@
 //! `POST /fuzzer_status` — scheduler heartbeat.
 
 use axum::{extract::State, http::StatusCode, Json};
+use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use log::error;
 
-use crate::schema::fuzzer_status;
+use crate::schema::{fuzzer_runtime, fuzzer_status};
 use crate::DbPool;
 
 use super::db_now;
-use super::types::{FuzzerStatusHeartbeat, MAX_FUZZERS_PER_HEARTBEAT, VALID_FUZZER_STATUSES};
+use super::types::{
+    runtime_delta, FuzzerStatusHeartbeat, RuntimeRow, MAX_FUZZERS_PER_HEARTBEAT,
+    MAX_SCHEDULER_INSTANCE_LEN, VALID_FUZZER_STATUSES,
+};
 
 pub async fn report_fuzzer_status(
     State(pool): State<DbPool>,
@@ -27,6 +31,16 @@ pub async fn report_fuzzer_status(
         return Err((
             StatusCode::BAD_REQUEST,
             format!("Too many fuzzers (max {MAX_FUZZERS_PER_HEARTBEAT})"),
+        ));
+    }
+    if payload
+        .scheduler_instance
+        .as_ref()
+        .is_some_and(|i| i.is_empty() || i.len() > MAX_SCHEDULER_INSTANCE_LEN)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid scheduler_instance".to_string(),
         ));
     }
     for f in &payload.fuzzers {
@@ -76,6 +90,19 @@ pub async fn report_fuzzer_status(
                     fuzzer_status::last_seen_at.eq(now),
                 ))
                 .execute(conn)?;
+
+            if let (Some(instance), Some(reported)) =
+                (&payload.scheduler_instance, f.runtime_seconds)
+            {
+                record_runtime(
+                    conn,
+                    &payload.scheduler_name,
+                    &f.sha,
+                    instance,
+                    reported,
+                    now,
+                )?;
+            }
         }
 
         diesel::delete(
@@ -96,4 +123,44 @@ pub async fn report_fuzzer_status(
     })?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Add the growth of the runtime counter of a binary to its total.
+fn record_runtime(
+    conn: &mut PgConnection,
+    scheduler_name: &str,
+    sha: &str,
+    instance: &str,
+    reported: u64,
+    now: NaiveDateTime,
+) -> QueryResult<()> {
+    let reported = i64::try_from(reported).unwrap_or(i64::MAX);
+    let previous = fuzzer_runtime::table
+        .filter(fuzzer_runtime::scheduler_name.eq(scheduler_name))
+        .filter(fuzzer_runtime::fuzzer_sha.eq(sha))
+        .select(RuntimeRow::as_select())
+        .for_update()
+        .first::<RuntimeRow>(conn)
+        .optional()?;
+    let delta = runtime_delta(previous.as_ref(), instance, reported);
+
+    diesel::insert_into(fuzzer_runtime::table)
+        .values((
+            fuzzer_runtime::scheduler_name.eq(scheduler_name),
+            fuzzer_runtime::fuzzer_sha.eq(sha),
+            fuzzer_runtime::total_runtime_seconds.eq(delta),
+            fuzzer_runtime::last_reported_seconds.eq(reported),
+            fuzzer_runtime::scheduler_instance.eq(instance),
+            fuzzer_runtime::updated_at.eq(now),
+        ))
+        .on_conflict((fuzzer_runtime::scheduler_name, fuzzer_runtime::fuzzer_sha))
+        .do_update()
+        .set((
+            fuzzer_runtime::total_runtime_seconds.eq(fuzzer_runtime::total_runtime_seconds + delta),
+            fuzzer_runtime::last_reported_seconds.eq(reported),
+            fuzzer_runtime::scheduler_instance.eq(instance),
+            fuzzer_runtime::updated_at.eq(now),
+        ))
+        .execute(conn)?;
+    Ok(())
 }

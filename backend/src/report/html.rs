@@ -320,6 +320,38 @@ pub(super) fn render_coverage_files(cov: &CoverageReport) -> String {
     out
 }
 
+/// Cell of the fuzzer table: line coverage of the binary, its change since the
+/// previous point, and its trend. The tooltip gives the other metrics.
+pub(super) fn render_fuzzer_coverage(metrics: &[CoverageMetricReport]) -> String {
+    let Some(lines) = metrics.iter().find(|m| m.metric_name == "lines") else {
+        return "-".to_string();
+    };
+    let mut title: Vec<String> = metrics
+        .iter()
+        .map(|m| {
+            format!(
+                "{} {:.2}% ({} / {})",
+                m.metric_name, m.percent, m.covered, m.total
+            )
+        })
+        .collect();
+    if let Some(first) = lines.history.first() {
+        title.push(format!(
+            "courbe depuis le {}",
+            first.captured_at.format("%Y-%m-%d %H:%M")
+        ));
+    }
+    let history: Vec<f64> = lines.history.iter().map(|p| p.percent).collect();
+    let color = coverage_color(lines.percent);
+    format!(
+        "<span title=\"{title}\">{pct}%{delta}{spark}</span>",
+        title = html_escape(&title.join(" · ")),
+        pct = lines.percent,
+        delta = render_delta(lines.delta_percent),
+        spark = sparkline(&history, color),
+    )
+}
+
 fn render_global_coverage(totals: &ReportTotals) -> String {
     if totals.coverage.is_empty() || totals.schedulers < 2 {
         return String::new();
@@ -465,19 +497,26 @@ pub(super) fn render_report_html(report: &ReportResponse) -> String {
         } else {
             out.push_str(
                 "  <table>\n    <thead><tr><th>Fuzzer</th><th>Statut</th><th>Uptime</th>\
-                 <th>Dernier update</th><th>SHA</th></tr></thead>\n    <tbody>\n",
+                 <th>Temps total</th><th>Coverage</th><th>Dernier update</th><th>SHA</th></tr></thead>\n    <tbody>\n",
             );
             for f in &s.fuzzer_details {
                 out.push_str(&format!(
                     "      <tr><td><strong>{name}</strong><span class=\"path\">{path}</span></td>\
                      <td><span class=\"pill pill-{status}\">{status}</span></td>\
-                     <td class=\"num\">{uptime}</td><td class=\"num\">{age}</td>\
+                     <td class=\"num\">{uptime}</td><td class=\"num\">{total}</td>\
+                     <td class=\"num\">{coverage}</td>\
+                     <td class=\"num\">{age}</td>\
                      <td class=\"mono muted\">{sha}</td></tr>\n",
+                    coverage = render_fuzzer_coverage(&f.coverage),
                     name = html_escape(&f.name),
                     path = html_escape(&f.path),
                     status = html_escape(&f.status),
                     uptime = f
                         .uptime_seconds
+                        .map(format_duration)
+                        .unwrap_or_else(|| "-".to_string()),
+                    total = f
+                        .total_runtime_seconds
                         .map(format_duration)
                         .unwrap_or_else(|| "-".to_string()),
                     age = format_duration(f.seconds_since_last_update),

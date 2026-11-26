@@ -77,6 +77,10 @@ Each fuzzer has its own corpus directory: `{corpus_directory}/{sha_hex}/`
 - Corpus is reused when binary restarts
 - Initialization file created if corpus is empty
 
+### Runtime Tracking
+
+The scheduler counts the time that each fuzzer binary runs, over all its runs. It sends the counter to the backend in each status report. The backend keeps the total for each binary hash. See [backend.md](backend.md).
+
 ### Crash Detection
 
 Monitors `{crashes_directory}/` for new crash files:
@@ -98,6 +102,20 @@ If `has_coverage` is true:
   merging, so repeated live snapshots update bounded files instead of appending
   complete profiles indefinitely
 - Project-wide coverage can be generated on demand by merging all task `.profraw` files into `{coverage_directory}/project.profdata` and running `llvm-cov` with every instrumented binary (multi-object)
+
+### Coverage Time Series of Each Fuzzer
+
+Each coverage snapshot also measures each fuzzer binary alone. The scheduler sends these measures to the backend, which keeps one point for each binary and each snapshot. Thus each binary gets a coverage time series. See [backend.md](backend.md).
+
+A point is added at each snapshot:
+
+- The first snapshot comes 5 minutes after the scheduler starts.
+- The next snapshots come every `coverage_snapshot_interval_minutes` (60 by default). See [config.md](config.md).
+- A build transition also adds a snapshot, for the binaries that it stops.
+
+If `coverage_snapshot_interval_minutes` is `0`, the scheduler adds points only at build transitions. Stopped and crashed fuzzers are measured too, because their profile stays on disk.
+
+For each binary, the scheduler merges the `.profraw` files of the binary into `{coverage_directory}/{fuzzer_name}/snapshot.profdata`. Then it runs `llvm-cov export --summary-only` on the binary alone. Thus each snapshot runs one `llvm-profdata merge` and one `llvm-cov export` for each fuzzer, in addition to the project measure. These commands run in the background thread of the snapshot, and only one snapshot runs at a time.
 
 
 ## State File

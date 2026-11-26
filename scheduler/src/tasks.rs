@@ -11,7 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::prelude::*;
 use chrono::TimeDelta;
@@ -93,6 +93,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             info!("stopping task: {target:x?}");
             if let Some(mut task) = self.tasks.remove(&target) {
                 self.kill_task(&mut task);
+                self.retire_task(target, &task);
                 info!("removing task: {target:?}");
             } else {
                 warn!("no task to stop for target 0x{}", hex::encode(target));
@@ -142,6 +143,7 @@ impl<C: TargetsCollector> Scheduler<C> {
 
             if let Some(mut task) = self.tasks.remove(&target) {
                 self.kill_task(&mut task);
+                self.retire_task(target, &task);
             }
             self.targets.remove(&target);
 
@@ -176,7 +178,19 @@ impl<C: TargetsCollector> Scheduler<C> {
             if previous.status == TaskStatus::Running {
                 self.kill_task(&mut previous);
             }
+            self.retire_task(sha, &previous);
         }
+    }
+
+    /// Add the running time of `task`, which leaves `tasks`, to its binary.
+    pub(crate) fn retire_task(&mut self, sha: Sha, task: &Task) {
+        *self.finished_runtime.entry(sha).or_default() += task.run_time();
+    }
+
+    /// Total running time of the binary `sha` since the scheduler started.
+    pub(crate) fn runtime_of(&self, sha: &Sha) -> Duration {
+        let finished = self.finished_runtime.get(sha).copied().unwrap_or_default();
+        finished + self.tasks.get(sha).map(Task::run_time).unwrap_or_default()
     }
 
     pub(crate) fn start_task(
@@ -657,11 +671,15 @@ impl<C: TargetsCollector> Scheduler<C> {
             path: String,
             status: &'static str,
             uptime_seconds: Option<u64>,
+            /// Running time of the binary since the scheduler started, over
+            /// all its runs. It never decreases within one `scheduler_instance`.
+            runtime_seconds: u64,
         }
 
         #[derive(Serialize)]
         struct HeartbeatPayload {
             scheduler_name: String,
+            scheduler_instance: String,
             fuzzers: Vec<FuzzerStatusInput>,
         }
 
@@ -678,6 +696,7 @@ impl<C: TargetsCollector> Scheduler<C> {
                 path: task.path.display().to_string(),
                 status,
                 uptime_seconds: Some(task.started_at.elapsed().as_secs()),
+                runtime_seconds: self.runtime_of(sha).as_secs(),
             });
         }
 
@@ -688,12 +707,14 @@ impl<C: TargetsCollector> Scheduler<C> {
                     path: path.display().to_string(),
                     status: "stopped",
                     uptime_seconds: None,
+                    runtime_seconds: self.runtime_of(sha).as_secs(),
                 });
             }
         }
 
         let payload = HeartbeatPayload {
             scheduler_name: self.scheduler_name.clone(),
+            scheduler_instance: self.instance_id.clone(),
             fuzzers,
         };
 
@@ -750,6 +771,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             if task.status == TaskStatus::Running {
                 self.kill_task(&mut task);
             }
+            self.retire_task(sha, &task);
         }
 
         let task_path = self.start_task_with_state_file_options(sha)?;

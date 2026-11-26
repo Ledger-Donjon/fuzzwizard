@@ -15,13 +15,13 @@ use std::time::Instant;
 use log::{debug, info, warn};
 use sha3::{Digest, Sha3_256};
 
-use crate::backend::SnapshotJob;
+use crate::backend::{FuzzerSnapshot, SnapshotJob};
 use crate::collector::Sha;
 use crate::coverage;
 use crate::process::{flush_coverage, flush_group_command, fuzzer_name_of, resolve_profraw_paths};
 use crate::types::{Task, TaskStatus};
 use crate::{snapshot_due_at, validation, Scheduler, TargetsCollector};
-use crate::{COVERAGE_FLUSH_TIMEOUT, PROJECT_PROFDATA, SNAPSHOT_PROFDATA};
+use crate::{COVERAGE_FLUSH_TIMEOUT, PROJECT_PROFDATA, SNAPSHOT_PROFDATA, TASK_PROFDATA};
 
 /// Clears the "snapshot running" flag when the snapshot thread ends, even by
 /// panicking, so that one failed snapshot does not disable all later ones.
@@ -150,6 +150,7 @@ impl<C: TargetsCollector> Scheduler<C> {
     fn task_coverage_request(
         &self,
         sha: &Sha,
+        profdata_name: &str,
     ) -> std::result::Result<coverage::CoverageRequest, String> {
         if !self.has_coverage {
             return Err("Coverage is not enabled for this scheduler".to_string());
@@ -162,11 +163,7 @@ impl<C: TargetsCollector> Scheduler<C> {
             .task_coverage_directory(task)
             .ok_or_else(|| format!("Invalid fuzzer file name: {:?}", task.path))?;
 
-        self.coverage_request(
-            std::iter::once((sha, task)),
-            coverage_dir,
-            "coverage.profdata",
-        )
+        self.coverage_request(std::iter::once((sha, task)), coverage_dir, profdata_name)
     }
 
     fn project_coverage_request(
@@ -186,7 +183,7 @@ impl<C: TargetsCollector> Scheduler<C> {
     /// Coverage summary for a single fuzzer, or the reason there is none.
     pub fn get_task_coverage(&self, sha: &Sha) -> String {
         let _query = self.lock_coverage_query();
-        match self.task_coverage_request(sha) {
+        match self.task_coverage_request(sha, TASK_PROFDATA) {
             Ok(request) => {
                 let title = format!("Coverage Analysis for: 0x{}", hex::encode(sha));
                 request.report(&title)
@@ -262,21 +259,13 @@ impl<C: TargetsCollector> Scheduler<C> {
             return false;
         }
 
-        let request = match self.project_coverage_request(SNAPSHOT_PROFDATA) {
-            Ok(r) => r,
+        let job = match self.snapshot_job(shas) {
+            Ok(job) => job,
             Err(e) => {
                 debug!("Coverage snapshot skipped: {e}");
                 self.snapshot_running.store(false, Ordering::SeqCst);
                 return false;
             }
-        };
-
-        let job = SnapshotJob {
-            request,
-            fingerprint: Self::compute_build_fingerprint(shas),
-            num_fuzzers: self.tasks.len() as i32,
-            scheduler_name: self.scheduler_name.clone(),
-            backend_url: self.backend_url.clone(),
         };
 
         let guard = SnapshotRunningGuard(Arc::clone(&self.snapshot_running));
@@ -287,11 +276,47 @@ impl<C: TargetsCollector> Scheduler<C> {
         true
     }
 
+    /// The project measure and one measure for each task. A stopped or crashed
+    /// task is measured too, because its profile stays on disk.
+    pub(crate) fn snapshot_job(
+        &self,
+        shas: &HashSet<Sha>,
+    ) -> std::result::Result<SnapshotJob, String> {
+        let request = self.project_coverage_request(SNAPSHOT_PROFDATA)?;
+        let fuzzers = self
+            .tasks
+            .iter()
+            .filter_map(
+                |(sha, task)| match self.task_coverage_request(sha, SNAPSHOT_PROFDATA) {
+                    Ok(request) => Some(FuzzerSnapshot {
+                        sha: hex::encode(sha),
+                        // A task without a valid file name has no request.
+                        name: fuzzer_name_of(&task.path)?.to_string(),
+                        request,
+                    }),
+                    Err(e) => {
+                        debug!("No coverage measure for 0x{}: {e}", hex::encode(sha));
+                        None
+                    }
+                },
+            )
+            .collect();
+
+        Ok(SnapshotJob {
+            request,
+            fuzzers,
+            fingerprint: Self::compute_build_fingerprint(shas),
+            num_fuzzers: self.tasks.len() as i32,
+            scheduler_name: self.scheduler_name.clone(),
+            backend_url: self.backend_url.clone(),
+        })
+    }
+
     /// Annotated source for one file of a fuzzer.
     pub fn get_task_file_coverage(&self, sha: &Sha, file_path: Option<&Path>) -> String {
         info!("Start file coverage for: {file_path:?}");
         let _query = self.lock_coverage_query();
-        match self.task_coverage_request(sha) {
+        match self.task_coverage_request(sha, TASK_PROFDATA) {
             Ok(request) => request.annotated_source(file_path),
             Err(e) => e,
         }

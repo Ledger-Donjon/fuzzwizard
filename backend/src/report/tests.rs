@@ -6,11 +6,12 @@
 use chrono::NaiveDateTime;
 
 use super::builder::{
-    health_from_age, percent, tail, HEARTBEAT_HEALTHY_SECS, HEARTBEAT_STALE_SECS, HISTORY_POINTS,
+    health_from_age, metric_report, percent, tail, HEARTBEAT_HEALTHY_SECS, HEARTBEAT_STALE_SECS,
+    HISTORY_POINTS,
 };
 use super::html::{
-    format_duration, render_coverage_files, render_delta, render_file_rows, render_report_html,
-    shorten_path, sparkline,
+    format_duration, render_coverage_files, render_delta, render_file_rows, render_fuzzer_coverage,
+    render_report_html, shorten_path, sparkline,
 };
 use super::types::*;
 
@@ -24,7 +25,22 @@ fn point(at: &str, covered: i32, total: i32) -> CoverageHistoryPoint {
         covered,
         total,
         percent: percent(covered.into(), total.into()),
+        runtime_seconds: None,
     }
+}
+
+/// Series of the binary `fuzz_parser`: line coverage grows from 25% to 37.5%.
+fn parser_coverage() -> Vec<CoverageMetricReport> {
+    let lines = vec![
+        point("2026-08-06 13:00:00", 100, 400),
+        point("2026-08-06 14:00:00", 120, 400),
+        point("2026-08-06 15:00:00", 150, 400),
+    ];
+    let functions = vec![point("2026-08-06 15:00:00", 9, 12)];
+    vec![
+        metric_report("functions".to_string(), functions).unwrap(),
+        metric_report("lines".to_string(), lines).unwrap(),
+    ]
 }
 
 fn sample_report() -> ReportResponse {
@@ -65,8 +81,10 @@ fn sample_report() -> ReportResponse {
                     status: "running".to_string(),
                     started_at: Some(ts("2026-08-06 12:59:48")),
                     uptime_seconds: Some(10_800),
+                    total_runtime_seconds: Some(90_000),
                     last_seen_at: ts("2026-08-06 15:59:48"),
                     seconds_since_last_update: 12,
+                    coverage: parser_coverage(),
                 },
                 FuzzerReport {
                     sha: "0011223344556677".to_string(),
@@ -75,8 +93,10 @@ fn sample_report() -> ReportResponse {
                     status: "crashed".to_string(),
                     started_at: Some(ts("2026-08-06 14:00:00")),
                     uptime_seconds: None,
+                    total_runtime_seconds: None,
                     last_seen_at: ts("2026-08-06 15:59:48"),
                     seconds_since_last_update: 12,
+                    coverage: Vec::new(),
                 },
             ],
             coverage: Some(CoverageReport {
@@ -205,6 +225,60 @@ fn heartbeat_start_time_comes_from_the_uptime() {
         legacy.fuzzers[0].started_at(ts("2026-08-06 13:00:00")),
         Some(ts("2026-08-06 12:59:48"))
     );
+}
+
+#[test]
+fn heartbeat_reads_the_runtime_counter_when_present() {
+    let payload: FuzzerStatusHeartbeat = serde_json::from_str(
+        r#"{"scheduler_name":"s","scheduler_instance":"01ab","fuzzers":[{"sha":"ab","path":"/t/f","status":"running","uptime_seconds":60,"runtime_seconds":7200}]}"#,
+    )
+    .unwrap();
+    assert_eq!(payload.scheduler_instance.as_deref(), Some("01ab"));
+    assert_eq!(payload.fuzzers[0].runtime_seconds, Some(7200));
+
+    let legacy: FuzzerStatusHeartbeat = serde_json::from_str(
+        r#"{"scheduler_name":"s","fuzzers":[{"sha":"ab","path":"/t/f","status":"running","uptime_seconds":60}]}"#,
+    )
+    .unwrap();
+    assert_eq!(legacy.scheduler_instance, None);
+    assert_eq!(legacy.fuzzers[0].runtime_seconds, None);
+}
+
+fn runtime_row(instance: &str, last: i64) -> RuntimeRow {
+    RuntimeRow {
+        scheduler_instance: instance.to_string(),
+        last_reported_seconds: last,
+    }
+}
+
+#[test]
+fn the_first_runtime_report_counts_whole() {
+    assert_eq!(runtime_delta(None, "a", 300), 300);
+}
+
+#[test]
+fn a_growing_counter_adds_its_growth() {
+    assert_eq!(runtime_delta(Some(&runtime_row("a", 300)), "a", 360), 60);
+    assert_eq!(runtime_delta(Some(&runtime_row("a", 300)), "a", 300), 0);
+}
+
+/// A restarted scheduler counts from zero: what it reports is all new time.
+#[test]
+fn a_new_scheduler_instance_counts_whole() {
+    assert_eq!(runtime_delta(Some(&runtime_row("a", 300)), "b", 500), 500);
+    assert_eq!(runtime_delta(Some(&runtime_row("a", 300)), "b", 40), 40);
+}
+
+#[test]
+fn a_counter_that_went_backwards_counts_whole() {
+    assert_eq!(runtime_delta(Some(&runtime_row("a", 300)), "a", 40), 40);
+}
+
+#[test]
+fn the_report_shows_the_total_runtime() {
+    let html = render_report_html(&sample_report());
+    assert!(html.contains("<th>Temps total</th>"));
+    assert!(html.contains(&format_duration(90_000)));
 }
 
 #[test]
@@ -350,6 +424,86 @@ fn history_keeps_the_most_recent_points() {
     let kept = tail(points, HISTORY_POINTS);
     assert_eq!(kept.len(), HISTORY_POINTS);
     assert_eq!(kept.last().unwrap().covered, 60);
+}
+
+#[test]
+fn an_empty_series_has_no_metric() {
+    assert!(metric_report("lines".to_string(), Vec::new()).is_none());
+}
+
+#[test]
+fn a_single_point_has_no_delta() {
+    let m = metric_report(
+        "lines".to_string(),
+        vec![point("2026-08-06 10:00:00", 30, 100)],
+    )
+    .unwrap();
+    assert_eq!((m.covered, m.total, m.percent), (30, 100, 30.0));
+    assert_eq!(m.previous_percent, None);
+    assert_eq!(m.delta_covered, None);
+    assert_eq!(m.delta_percent, None);
+    assert_eq!(m.peak_percent, 30.0);
+}
+
+#[test]
+fn the_delta_compares_the_last_two_points_and_the_peak_spans_the_series() {
+    let m = metric_report(
+        "lines".to_string(),
+        vec![
+            point("2026-08-06 10:00:00", 20, 100),
+            point("2026-08-06 11:00:00", 50, 100),
+            point("2026-08-06 12:00:00", 40, 100),
+        ],
+    )
+    .unwrap();
+    assert_eq!(m.covered, 40);
+    assert_eq!(m.previous_covered, Some(50));
+    assert_eq!(m.delta_covered, Some(-10));
+    assert_eq!(m.delta_percent, Some(-10.0));
+    assert_eq!(m.peak_percent, 50.0);
+    assert_eq!(m.peak_captured_at, Some(ts("2026-08-06 11:00:00")));
+}
+
+#[test]
+fn a_long_series_keeps_its_peak_but_caps_its_history() {
+    let mut points: Vec<CoverageHistoryPoint> = (0..60)
+        .map(|i| point(&format!("2026-08-06 10:{i:02}:00"), 10 + i, 100))
+        .collect();
+    points[0] = point("2026-08-06 09:00:00", 95, 100);
+    let m = metric_report("lines".to_string(), points).unwrap();
+    assert_eq!(m.history.len(), HISTORY_POINTS);
+    assert_eq!(m.peak_percent, 95.0);
+    assert_eq!(m.covered, 69);
+}
+
+#[test]
+fn the_fuzzer_table_shows_the_coverage_of_each_binary() {
+    let cell = render_fuzzer_coverage(&parser_coverage());
+    assert!(cell.contains("37.5%"));
+    assert!(cell.contains("+7.50 pts"));
+    assert!(cell.contains("<svg class=\"spark\""));
+    assert!(cell.contains("functions 75.00% (9 / 12)"));
+    assert!(cell.contains("courbe depuis le 2026-08-06 13:00"));
+
+    let html = render_report_html(&sample_report());
+    assert!(html.contains("<th>Coverage</th>"));
+}
+
+#[test]
+fn a_binary_without_coverage_shows_a_dash() {
+    assert_eq!(render_fuzzer_coverage(&[]), "-");
+}
+
+#[test]
+fn only_fuzzer_points_carry_a_runtime() {
+    let mut p = point("2026-08-06 10:00:00", 1, 2);
+    assert!(!serde_json::to_string(&p)
+        .unwrap()
+        .contains("runtime_seconds"));
+    p.runtime_seconds = Some(3600);
+    assert!(serde_json::to_string(&p)
+        .unwrap()
+        .contains("\"runtime_seconds\":3600"));
 }
 
 #[test]
